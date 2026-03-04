@@ -63,7 +63,7 @@ esp_err_t hashanchor_submit(const uint8_t hash[32], const uint8_t signature[64],
 
     /* Build endpoint URL */
     char endpoint[256];
-    snprintf(endpoint, sizeof(endpoint), "%s/v1/anchor/hash", url);
+    snprintf(endpoint, sizeof(endpoint), "%s/v1/hashes", url);
 
     /* Convert hash and signature to hex strings */
     char hash_hex[67]; /* "0x" + 64 hex chars + null */

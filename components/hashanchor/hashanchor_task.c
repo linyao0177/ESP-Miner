@@ -78,38 +78,15 @@ void hashanchor_task(void *pvParameters)
         return;
     }
 
-    /* Wait for initial config before attempting registration */
-    vTaskDelay(pdMS_TO_TICKS(5000));
-
-    /* Attempt device registration (non-fatal if it fails) */
-    if (nvs_config_get_bool(NVS_CONFIG_HASHANCHOR_ENABLED)) {
-        esp_err_t reg_err = hashanchor_register_device(state);
-        if (reg_err != ESP_OK) {
-            ESP_LOGW(TAG, "Device registration failed, will retry on next cycle");
-        }
-    }
-
-    bool registered = false;
+    ESP_LOGI(TAG, "Crypto initialized. Public key: %s", hashanchor_get_public_key_hex());
 
     while (1) {
         if (!nvs_config_get_bool(NVS_CONFIG_HASHANCHOR_ENABLED)) {
-            vTaskDelay(pdMS_TO_TICKS(10000));
-            registered = false;
+            vTaskDelay(pdMS_TO_TICKS(30000));
             continue;
         }
 
-        /* Retry registration if not done yet */
-        if (!registered) {
-            if (hashanchor_register_device(state) == ESP_OK) {
-                registered = true;
-            } else {
-                ESP_LOGW(TAG, "Registration retry failed, will try again next cycle");
-                vTaskDelay(pdMS_TO_TICKS(30000));
-                continue;
-            }
-        }
-
-        /* 1. Collect telemetry data from GlobalState */
+        /* Collect telemetry */
         cJSON *payload = hashanchor_collect(state);
         char *json_str = cJSON_PrintUnformatted(payload);
 
@@ -120,32 +97,27 @@ void hashanchor_task(void *pvParameters)
             continue;
         }
 
-        ESP_LOGD(TAG, "Telemetry: %s", json_str);
-
-        /* 2. SHA-256 hash (mbedTLS hardware accelerated on ESP32-S3) */
+        /* SHA-256 hash */
         uint8_t hash[32];
         mbedtls_sha256((const unsigned char *)json_str, strlen(json_str), hash, 0);
 
-        /* 3. Ed25519 sign the hash */
+        /* Ed25519 sign the hash */
         uint8_t sig[64];
         hashanchor_sign(hash, 32, sig);
 
-        /* 4. Submit to HashAnchor API */
-        esp_err_t submit_err = hashanchor_submit(hash, sig, payload);
-        if (submit_err == ESP_OK) {
-            char hash_hex[9];
-            for (int i = 0; i < 4; i++) sprintf(hash_hex + i * 2, "%02x", hash[i]);
-            hash_hex[8] = '\0';
-            ESP_LOGI(TAG, "Submitted hash 0x%s...", hash_hex);
+        /* Submit to HashAnchor API */
+        char *url = nvs_config_get_string(NVS_CONFIG_HASHANCHOR_URL);
+        if (url && strlen(url) > 0) {
+            hashanchor_submit(hash, sig, payload);
         }
+        free(url);
 
         cJSON_Delete(payload);
         free(json_str);
 
         /* Sleep for configured interval */
         uint16_t interval = nvs_config_get_u16(NVS_CONFIG_HASHANCHOR_INTERVAL);
-        if (interval < 60) interval = 60; /* Minimum 60 seconds */
-        ESP_LOGD(TAG, "Next submission in %d seconds", interval);
+        if (interval < 60) interval = 60;
         vTaskDelay(pdMS_TO_TICKS(interval * 1000));
     }
 }
