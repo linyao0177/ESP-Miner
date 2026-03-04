@@ -2,9 +2,11 @@
 #include "global_state.h"
 #include "nvs_config.h"
 
-#include "esp_log.h"
-#include "mbedtls/sha256.h"
+#include "boat_crypto.h"
+#include "boat_identity.h"
+#include "boat_attest.h"
 
+#include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -14,10 +16,8 @@
 
 static const char *TAG = "ha_task";
 
-cJSON *hashanchor_collect(void *global_state)
+static cJSON *hashanchor_collect(GlobalState *state)
 {
-    GlobalState *state = (GlobalState *)global_state;
-
     cJSON *payload = cJSON_CreateObject();
 
     /* Timestamp */
@@ -58,6 +58,24 @@ cJSON *hashanchor_collect(void *global_state)
     return payload;
 }
 
+static char *build_device_info_json(void)
+{
+    cJSON *info = cJSON_CreateObject();
+    char *board_version = nvs_config_get_string(NVS_CONFIG_BOARD_VERSION);
+    char *asic_model = nvs_config_get_string(NVS_CONFIG_ASIC_MODEL);
+    char *device_model = nvs_config_get_string(NVS_CONFIG_DEVICE_MODEL);
+    char *hostname = nvs_config_get_string(NVS_CONFIG_HOSTNAME);
+
+    if (board_version) { cJSON_AddStringToObject(info, "boardVersion", board_version); free(board_version); }
+    if (asic_model)    { cJSON_AddStringToObject(info, "asicModel", asic_model); free(asic_model); }
+    if (device_model)  { cJSON_AddStringToObject(info, "deviceModel", device_model); free(device_model); }
+    if (hostname)      { cJSON_AddStringToObject(info, "hostname", hostname); free(hostname); }
+
+    char *json = cJSON_PrintUnformatted(info);
+    cJSON_Delete(info);
+    return json;
+}
+
 void hashanchor_task(void *pvParameters)
 {
     GlobalState *state = (GlobalState *)pvParameters;
@@ -69,24 +87,61 @@ void hashanchor_task(void *pvParameters)
         vTaskDelay(pdMS_TO_TICKS(5000));
     }
 
-    ESP_LOGI(TAG, "WiFi connected, initializing crypto...");
+    ESP_LOGI(TAG, "WiFi connected, initializing boat-mwr crypto...");
 
-    /* Initialize Ed25519 keypair (load from NVS or generate new) */
-    if (hashanchor_crypto_init() != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize crypto, task exiting");
+    /* Initialize dual keypair (Ed25519 + secp256k1) via boat-mwr */
+    boat_keypair_t kp;
+    if (boat_crypto_init(&kp) != BOAT_OK) {
+        ESP_LOGE(TAG, "Failed to initialize boat-mwr crypto, task exiting");
         vTaskDelete(NULL);
         return;
     }
 
-    ESP_LOGI(TAG, "Crypto initialized. Public key: %s", hashanchor_get_public_key_hex());
+    ESP_LOGI(TAG, "boat-mwr initialized. Ed25519 PK: %s, ETH: %s",
+             kp.ed25519_pk_hex, kp.eth_addr_hex);
 
     /* Auto-register device (only when enabled and configured) */
     if (nvs_config_get_bool(NVS_CONFIG_HASHANCHOR_ENABLED)) {
-        hashanchor_register_device(state);
+        char *url = nvs_config_get_string(NVS_CONFIG_HASHANCHOR_URL);
+        char *api_key = nvs_config_get_string(NVS_CONFIG_HASHANCHOR_API_KEY);
+        char *device_id = nvs_config_get_string(NVS_CONFIG_HASHANCHOR_DEVICE_ID);
+
+        if (url && strlen(url) > 0 && api_key && strlen(api_key) > 0 &&
+            device_id && strlen(device_id) > 0) {
+            boat_config_t cfg = {
+                .relay_url = url,
+                .api_key = api_key,
+                .device_id = device_id,
+            };
+            char *dev_info = build_device_info_json();
+            boat_err_t err = boat_identity_register_ext(&cfg, &kp, dev_info);
+            if (err != BOAT_OK) {
+                ESP_LOGW(TAG, "Device registration failed (non-fatal)");
+            }
+            free(dev_info);
+        } else {
+            ESP_LOGW(TAG, "Cannot register: URL, API key, or device ID not configured");
+        }
+
+        free(url);
+        free(api_key);
+        free(device_id);
     }
 
     while (1) {
         if (!nvs_config_get_bool(NVS_CONFIG_HASHANCHOR_ENABLED)) {
+            vTaskDelay(pdMS_TO_TICKS(30000));
+            continue;
+        }
+
+        /* Read NVS config for this iteration */
+        char *url = nvs_config_get_string(NVS_CONFIG_HASHANCHOR_URL);
+        char *api_key = nvs_config_get_string(NVS_CONFIG_HASHANCHOR_API_KEY);
+        char *device_id = nvs_config_get_string(NVS_CONFIG_HASHANCHOR_DEVICE_ID);
+
+        if (!url || strlen(url) == 0 || !api_key || strlen(api_key) == 0) {
+            ESP_LOGW(TAG, "HashAnchor URL or API key not configured, skipping");
+            free(url); free(api_key); free(device_id);
             vTaskDelay(pdMS_TO_TICKS(30000));
             continue;
         }
@@ -98,23 +153,41 @@ void hashanchor_task(void *pvParameters)
         if (!json_str) {
             ESP_LOGE(TAG, "Failed to serialize telemetry");
             cJSON_Delete(payload);
+            free(url); free(api_key); free(device_id);
             vTaskDelay(pdMS_TO_TICKS(10000));
             continue;
         }
 
-        /* SHA-256 hash */
-        uint8_t hash[32];
-        mbedtls_sha256((const unsigned char *)json_str, strlen(json_str), hash, 0);
+        /* Create attestation: SHA-256 hash + Ed25519 sign */
+        boat_attestation_t att;
+        boat_err_t err = boat_attest_create(&kp, json_str, &att);
+        if (err != BOAT_OK) {
+            ESP_LOGE(TAG, "Failed to create attestation");
+            cJSON_Delete(payload);
+            free(json_str);
+            free(url); free(api_key); free(device_id);
+            vTaskDelay(pdMS_TO_TICKS(10000));
+            continue;
+        }
 
-        /* Ed25519 sign the hash */
-        uint8_t sig[64];
-        hashanchor_sign(hash, 32, sig);
-
-        /* Submit to HashAnchor API */
-        hashanchor_submit(hash, sig, payload);
+        /* Submit to HashAnchor with telemetry as metadata */
+        char *metadata_json = cJSON_PrintUnformatted(payload);
+        boat_config_t cfg = {
+            .relay_url = url,
+            .api_key = api_key,
+            .device_id = device_id,
+        };
+        err = boat_attest_submit(&cfg, &kp, &att, metadata_json);
+        if (err != BOAT_OK) {
+            ESP_LOGW(TAG, "Attestation submit failed");
+        }
 
         cJSON_Delete(payload);
         free(json_str);
+        free(metadata_json);
+        free(url);
+        free(api_key);
+        free(device_id);
 
         /* Sleep for configured interval */
         uint16_t interval = nvs_config_get_u16(NVS_CONFIG_HASHANCHOR_INTERVAL);
