@@ -950,6 +950,19 @@ static esp_err_t GET_system_info(httpd_req_t * req)
 
     cJSON_AddNumberToObject(root, "statsFrequency", nvs_config_get_u16(NVS_CONFIG_STATISTICS_FREQUENCY));
 
+    /* HashAnchor settings */
+    char *ha_url = nvs_config_get_string(NVS_CONFIG_HASHANCHOR_URL);
+    char *ha_apikey = nvs_config_get_string(NVS_CONFIG_HASHANCHOR_API_KEY);
+    char *ha_devid = nvs_config_get_string(NVS_CONFIG_HASHANCHOR_DEVICE_ID);
+    cJSON_AddStringToObject(root, "hashanchorURL", ha_url ? ha_url : "");
+    cJSON_AddStringToObject(root, "hashanchorApiKey", ha_apikey ? ha_apikey : "");
+    cJSON_AddBoolToObject(root, "hashanchorEnabled", nvs_config_get_bool(NVS_CONFIG_HASHANCHOR_ENABLED));
+    cJSON_AddNumberToObject(root, "hashanchorInterval", nvs_config_get_u16(NVS_CONFIG_HASHANCHOR_INTERVAL));
+    cJSON_AddStringToObject(root, "hashanchorDeviceId", ha_devid ? ha_devid : "");
+    free(ha_url);
+    free(ha_apikey);
+    free(ha_devid);
+
     cJSON_AddNumberToObject(root, "blockFound", GLOBAL_STATE->SYSTEM_MODULE.block_found);
     cJSON_AddBoolToObject(root, "showNewBlock", GLOBAL_STATE->SYSTEM_MODULE.show_new_block);
 

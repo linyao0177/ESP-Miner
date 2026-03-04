@@ -172,7 +172,12 @@ export class EditComponent implements OnInit, OnDestroy, OnChanges {
             Validators.required,
             Validators.min(0),
             Validators.max(this.statsFrequencyMaxValue)
-          ]]
+          ]],
+          hashanchorEnabled: [info.hashanchorEnabled ?? false],
+          hashanchorURL: [info.hashanchorURL ?? ''],
+          hashanchorApiKey: [info.hashanchorApiKey ?? ''],
+          hashanchorDeviceId: [info.hashanchorDeviceId ?? ''],
+          hashanchorInterval: [info.hashanchorInterval ?? 300, [Validators.min(60)]]
         });
 
         this.formSubject.next(this.form);

@@ -80,6 +80,11 @@ void hashanchor_task(void *pvParameters)
 
     ESP_LOGI(TAG, "Crypto initialized. Public key: %s", hashanchor_get_public_key_hex());
 
+    /* Auto-register device (only when enabled and configured) */
+    if (nvs_config_get_bool(NVS_CONFIG_HASHANCHOR_ENABLED)) {
+        hashanchor_register_device(state);
+    }
+
     while (1) {
         if (!nvs_config_get_bool(NVS_CONFIG_HASHANCHOR_ENABLED)) {
             vTaskDelay(pdMS_TO_TICKS(30000));
@@ -106,11 +111,7 @@ void hashanchor_task(void *pvParameters)
         hashanchor_sign(hash, 32, sig);
 
         /* Submit to HashAnchor API */
-        char *url = nvs_config_get_string(NVS_CONFIG_HASHANCHOR_URL);
-        if (url && strlen(url) > 0) {
-            hashanchor_submit(hash, sig, payload);
-        }
-        free(url);
+        hashanchor_submit(hash, sig, payload);
 
         cJSON_Delete(payload);
         free(json_str);

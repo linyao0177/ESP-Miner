@@ -481,6 +481,21 @@ components:
               description: Hashrate register value per ASIC
               items:
                 $ref: '#/components/schemas/HashrateMonitorAsic'
+        hashanchorURL:
+          type: string
+          description: HashAnchor API URL
+        hashanchorApiKey:
+          type: string
+          description: HashAnchor API key
+        hashanchorEnabled:
+          type: boolean
+          description: Whether HashAnchor telemetry anchoring is enabled
+        hashanchorInterval:
+          type: integer
+          description: HashAnchor report interval in seconds
+        hashanchorDeviceId:
+          type: string
+          description: HashAnchor device identifier
 
     SystemASIC:
       type: object
@@ -708,6 +723,22 @@ components:
           minimum: 0
           examples:
             - 120
+        hashanchorURL:
+          type: string
+          description: HashAnchor API URL
+        hashanchorApiKey:
+          type: string
+          description: HashAnchor API key (ha_xxx)
+        hashanchorEnabled:
+          type: boolean
+          description: Enable HashAnchor telemetry anchoring
+        hashanchorInterval:
+          type: integer
+          description: HashAnchor report interval in seconds
+          minimum: 60
+        hashanchorDeviceId:
+          type: string
+          description: HashAnchor device identifier
       additionalProperties: true
 
   responses:

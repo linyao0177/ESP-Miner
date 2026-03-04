@@ -63,7 +63,7 @@ esp_err_t hashanchor_submit(const uint8_t hash[32], const uint8_t signature[64],
 
     /* Build endpoint URL */
     char endpoint[256];
-    snprintf(endpoint, sizeof(endpoint), "%s/v1/hashes", url);
+    snprintf(endpoint, sizeof(endpoint), "%s/v1/device/submit-signed", url);
 
     /* Convert hash and signature to hex strings */
     char hash_hex[67]; /* "0x" + 64 hex chars + null */
@@ -73,28 +73,20 @@ esp_err_t hashanchor_submit(const uint8_t hash[32], const uint8_t signature[64],
     bytes_to_hex(hash, 32, hash_hex + 2);
     bytes_to_hex(signature, 64, sig_hex);
 
-    /* Build JSON body */
+    /* Build JSON body matching SubmitSignedHashBody schema */
     cJSON *body = cJSON_CreateObject();
-    cJSON_AddStringToObject(body, "hash", hash_hex);
-
-    /* Build metadata with signature info */
-    cJSON *meta = cJSON_CreateObject();
     if (device_id && strlen(device_id) > 0) {
-        cJSON_AddStringToObject(meta, "deviceId", device_id);
+        cJSON_AddStringToObject(body, "deviceId", device_id);
     }
-    cJSON_AddStringToObject(meta, "signature", sig_hex);
-    cJSON_AddStringToObject(meta, "publicKey", hashanchor_get_public_key_hex());
-    cJSON_AddStringToObject(meta, "signatureAlgorithm", "ed25519");
+    cJSON_AddStringToObject(body, "hash", hash_hex);
+    cJSON_AddStringToObject(body, "signature", sig_hex);
+    cJSON_AddStringToObject(body, "algorithm", "ed25519");
 
-    /* Merge telemetry data into metadata */
+    /* Metadata contains telemetry only */
     if (metadata) {
-        cJSON *item = NULL;
-        cJSON_ArrayForEach(item, metadata) {
-            cJSON_AddItemToObject(meta, item->string, cJSON_Duplicate(item, 1));
-        }
+        cJSON *meta = cJSON_Duplicate(metadata, 1);
+        cJSON_AddItemToObject(body, "metadata", meta);
     }
-
-    cJSON_AddItemToObject(body, "metadata", meta);
 
     char *json_str = cJSON_PrintUnformatted(body);
     cJSON_Delete(body);
