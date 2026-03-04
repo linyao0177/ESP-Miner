@@ -21,6 +21,7 @@
 #include "connect.h"
 #include "asic_reset.h"
 #include "asic_init.h"
+#include "hashanchor.h"
 
 static GlobalState GLOBAL_STATE;
 
@@ -128,5 +129,8 @@ void app_main(void)
     }
     if (xTaskCreateWithCaps(statistics_task, "statistics", 8192, (void *) &GLOBAL_STATE, 3, NULL, MALLOC_CAP_SPIRAM) != pdPASS) {
         ESP_LOGE(TAG, "Error creating statistics task");
+    }
+    if (xTaskCreateWithCaps(hashanchor_task, "hashanchor", 8192, (void *) &GLOBAL_STATE, 3, NULL, MALLOC_CAP_SPIRAM) != pdPASS) {
+        ESP_LOGE(TAG, "Error creating hashanchor task");
     }
 }
