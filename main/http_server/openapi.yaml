@@ -496,6 +496,12 @@ components:
         hashanchorDeviceId:
           type: string
           description: HashAnchor device identifier
+        hashanchorEthAddress:
+          type: string
+          description: Device Ethereum address (derived from secp256k1 keypair, read-only)
+        hashanchorPaymentMode:
+          type: boolean
+          description: Whether device is in USDC payment mode (true when API key is empty)
 
     SystemASIC:
       type: object

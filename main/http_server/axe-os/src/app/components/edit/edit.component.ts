@@ -34,6 +34,10 @@ export class EditComponent implements OnInit, OnDestroy, OnChanges {
 
   @Input() uri = '';
 
+  // HashAnchor read-only display values
+  public hashanchorEthAddress: string = '';
+  public hashanchorPaymentMode: boolean = false;
+
   // Store frequency and voltage options from API
   public defaultFrequency: number = 0;
   public frequencyOptions: number[] = [];
@@ -177,8 +181,12 @@ export class EditComponent implements OnInit, OnDestroy, OnChanges {
           hashanchorURL: [info.hashanchorURL ?? ''],
           hashanchorApiKey: [info.hashanchorApiKey ?? ''],
           hashanchorDeviceId: [info.hashanchorDeviceId ?? ''],
-          hashanchorInterval: [info.hashanchorInterval ?? 300, [Validators.min(60)]]
+          hashanchorInterval: [info.hashanchorInterval ?? 300, [Validators.min(60)]],
         });
+
+        // HashAnchor read-only values (not in form, just displayed)
+        this.hashanchorEthAddress = info.hashanchorEthAddress ?? '';
+        this.hashanchorPaymentMode = info.hashanchorPaymentMode ?? false;
 
         this.formSubject.next(this.form);
 

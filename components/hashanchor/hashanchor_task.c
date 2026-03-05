@@ -5,6 +5,7 @@
 #include "boat_crypto.h"
 #include "boat_identity.h"
 #include "boat_attest.h"
+#include "boat_pay.h"
 
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -15,6 +16,12 @@
 #include <time.h>
 
 static const char *TAG = "ha_task";
+
+/* Polygon USDC contract address */
+static const uint8_t USDC_CONTRACT[20] = {
+    0x3c, 0x49, 0x9c, 0x54, 0x2c, 0xEF, 0x5E, 0x38, 0x11, 0xe1,
+    0x19, 0x2c, 0xe7, 0x0d, 0x8c, 0xC0, 0x3d, 0x5c, 0x33, 0x59
+};
 
 static cJSON *hashanchor_collect(GlobalState *state)
 {
@@ -100,6 +107,16 @@ void hashanchor_task(void *pvParameters)
     ESP_LOGI(TAG, "boat-mwr initialized. Ed25519 PK: %s, ETH: %s",
              kp.ed25519_pk_hex, kp.eth_addr_hex);
 
+    /* Persist ETH address to main NVS so HTTP server can expose it */
+    nvs_config_set_string(NVS_CONFIG_HASHANCHOR_ETH_ADDRESS, kp.eth_addr_hex);
+
+    /* Initialize EIP-712 domain for Polygon USDC (needed for payment mode) */
+    boat_pay_set_domain(137, USDC_CONTRACT);
+
+    /* Cached payment requirements (persists across loop iterations) */
+    boat_pay_requirements_t pay_req;
+    memset(&pay_req, 0, sizeof(pay_req));
+
     /* Auto-register device (only when enabled and configured) */
     if (nvs_config_get_bool(NVS_CONFIG_HASHANCHOR_ENABLED)) {
         char *url = nvs_config_get_string(NVS_CONFIG_HASHANCHOR_URL);
@@ -139,8 +156,18 @@ void hashanchor_task(void *pvParameters)
         char *api_key = nvs_config_get_string(NVS_CONFIG_HASHANCHOR_API_KEY);
         char *device_id = nvs_config_get_string(NVS_CONFIG_HASHANCHOR_DEVICE_ID);
 
-        if (!url || strlen(url) == 0 || !api_key || strlen(api_key) == 0) {
-            ESP_LOGW(TAG, "HashAnchor URL or API key not configured, skipping");
+        /* Determine payment mode: API key empty → use USDC payment */
+        int payment_mode = (!api_key || strlen(api_key) == 0);
+
+        if (!url || strlen(url) == 0) {
+            ESP_LOGW(TAG, "HashAnchor URL not configured, skipping");
+            free(url); free(api_key); free(device_id);
+            vTaskDelay(pdMS_TO_TICKS(30000));
+            continue;
+        }
+
+        if (!payment_mode && (!api_key || strlen(api_key) == 0)) {
+            ESP_LOGW(TAG, "HashAnchor API key not configured, skipping");
             free(url); free(api_key); free(device_id);
             vTaskDelay(pdMS_TO_TICKS(30000));
             continue;
@@ -177,9 +204,21 @@ void hashanchor_task(void *pvParameters)
             .api_key = api_key,
             .device_id = device_id,
         };
-        err = boat_attest_submit(&cfg, &kp, &att, metadata_json);
-        if (err != BOAT_OK) {
-            ESP_LOGW(TAG, "Attestation submit failed");
+
+        if (payment_mode) {
+            /* Payment mode: submit with USDC payment (EIP-3009) */
+            err = boat_attest_submit_paid(&cfg, &kp, &att, metadata_json, &pay_req);
+            if (err == BOAT_OK) {
+                ESP_LOGI(TAG, "Paid attestation submitted successfully");
+            } else {
+                ESP_LOGW(TAG, "Paid attestation submit failed: %d", err);
+            }
+        } else {
+            /* API Key mode: existing flow */
+            err = boat_attest_submit(&cfg, &kp, &att, metadata_json);
+            if (err != BOAT_OK) {
+                ESP_LOGW(TAG, "Attestation submit failed");
+            }
         }
 
         cJSON_Delete(payload);

@@ -959,9 +959,14 @@ static esp_err_t GET_system_info(httpd_req_t * req)
     cJSON_AddBoolToObject(root, "hashanchorEnabled", nvs_config_get_bool(NVS_CONFIG_HASHANCHOR_ENABLED));
     cJSON_AddNumberToObject(root, "hashanchorInterval", nvs_config_get_u16(NVS_CONFIG_HASHANCHOR_INTERVAL));
     cJSON_AddStringToObject(root, "hashanchorDeviceId", ha_devid ? ha_devid : "");
+    char *ha_ethaddr = nvs_config_get_string(NVS_CONFIG_HASHANCHOR_ETH_ADDRESS);
+    cJSON_AddStringToObject(root, "hashanchorEthAddress", ha_ethaddr ? ha_ethaddr : "");
+    /* Payment mode: true when API key is empty (device pays with USDC instead) */
+    cJSON_AddBoolToObject(root, "hashanchorPaymentMode", (!ha_apikey || strlen(ha_apikey) == 0));
     free(ha_url);
     free(ha_apikey);
     free(ha_devid);
+    free(ha_ethaddr);
 
     cJSON_AddNumberToObject(root, "blockFound", GLOBAL_STATE->SYSTEM_MODULE.block_found);
     cJSON_AddBoolToObject(root, "showNewBlock", GLOBAL_STATE->SYSTEM_MODULE.show_new_block);

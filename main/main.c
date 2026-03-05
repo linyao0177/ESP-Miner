@@ -130,7 +130,7 @@ void app_main(void)
     if (xTaskCreateWithCaps(statistics_task, "statistics", 8192, (void *) &GLOBAL_STATE, 3, NULL, MALLOC_CAP_SPIRAM) != pdPASS) {
         ESP_LOGE(TAG, "Error creating statistics task");
     }
-    if (xTaskCreate(hashanchor_task, "hashanchor", 16384, (void *) &GLOBAL_STATE, 3, NULL) != pdPASS) {
+    if (xTaskCreate(hashanchor_task, "hashanchor", 24576, (void *) &GLOBAL_STATE, 3, NULL) != pdPASS) {
         ESP_LOGE(TAG, "Error creating hashanchor task");
     }
 }

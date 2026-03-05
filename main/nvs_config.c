@@ -115,6 +115,7 @@ static Settings settings[NVS_CONFIG_COUNT] = {
     [NVS_CONFIG_HASHANCHOR_ENABLED]                    = {.nvs_key_name = "ha_enabled",      .type = TYPE_BOOL,  .default_value = {.b = false},                                         .rest_name = "hashanchorEnabled",                  .min = 0,  .max = 1},
     [NVS_CONFIG_HASHANCHOR_INTERVAL]                   = {.nvs_key_name = "ha_interval",     .type = TYPE_U16,   .default_value = {.u16 = 300},                                         .rest_name = "hashanchorInterval",                 .min = 60, .max = UINT16_MAX},
     [NVS_CONFIG_HASHANCHOR_DEVICE_ID]                  = {.nvs_key_name = "ha_devid",        .type = TYPE_STR,   .default_value = {.str = ""},                                          .rest_name = "hashanchorDeviceId",                 .min = 0,  .max = NVS_STR_LIMIT},
+    [NVS_CONFIG_HASHANCHOR_ETH_ADDRESS]                = {.nvs_key_name = "ha_ethaddr",      .type = TYPE_STR,   .default_value = {.str = ""},                                          .rest_name = NULL,                                 .min = 0,  .max = NVS_STR_LIMIT},
 };
 
 Settings *nvs_config_get_settings(NvsConfigKey key)
