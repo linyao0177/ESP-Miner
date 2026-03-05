@@ -35,6 +35,8 @@
 #include "cJSON.h"
 #include "global_state.h"
 #include "nvs_config.h"
+#include "nvs.h"
+#include "boat_crypto.h"
 #include "vcore.h"
 #include "connect.h"
 #include "asic.h"
@@ -1297,6 +1299,55 @@ esp_err_t http_404_error_handler(httpd_req_t * req, httpd_err_code_t err)
     return ESP_OK;
 }
 
+static esp_err_t GET_hashanchor_exportkey(httpd_req_t * req)
+{
+    if (is_network_allowed(req) != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    if (set_cors_headers(req) != ESP_OK) {
+        httpd_resp_send_500(req);
+        return ESP_OK;
+    }
+
+    /* Read secp256k1 private key from boat_mwr NVS namespace */
+    uint8_t sk[32];
+    size_t sk_len = sizeof(sk);
+    nvs_handle_t nvs;
+    esp_err_t err = nvs_open("boat_mwr", NVS_READONLY, &nvs);
+    if (err != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "NVS open failed");
+    }
+    err = nvs_get_blob(nvs, "boat_secp256k1", sk, &sk_len);
+    nvs_close(nvs);
+    if (err != ESP_OK || sk_len != 32) {
+        return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Key not found");
+    }
+
+    /* Convert to 0x-prefixed hex */
+    char hex[67]; /* "0x" + 64 hex chars + '\0' */
+    hex[0] = '0';
+    hex[1] = 'x';
+    boat_bytes_to_hex(sk, 32, hex + 2);
+    hex[66] = '\0';
+
+    /* Get ETH address */
+    char *eth_addr = nvs_config_get_string(NVS_CONFIG_HASHANCHOR_ETH_ADDRESS);
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "privateKey", hex);
+    cJSON_AddStringToObject(root, "ethAddress", eth_addr ? eth_addr : "");
+    free(eth_addr);
+
+    char *json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+
+    httpd_resp_sendstr(req, json);
+    free(json);
+    return ESP_OK;
+}
+
 esp_err_t start_rest_server(void * pvParameters)
 {
     GLOBAL_STATE = (GlobalState *) pvParameters;
@@ -1414,12 +1465,21 @@ esp_err_t start_rest_server(void * pvParameters)
     httpd_register_uri_handler(server, &system_dismiss_block_found_uri);
 
     httpd_uri_t update_system_settings_uri = {
-        .uri = "/api/system", 
-        .method = HTTP_PATCH, 
-        .handler = PATCH_update_settings, 
+        .uri = "/api/system",
+        .method = HTTP_PATCH,
+        .handler = PATCH_update_settings,
         .user_ctx = rest_context
     };
     httpd_register_uri_handler(server, &update_system_settings_uri);
+
+    /* HashAnchor: export secp256k1 private key for Gateway deposit */
+    httpd_uri_t hashanchor_exportkey_uri = {
+        .uri = "/api/hashanchor/exportkey",
+        .method = HTTP_GET,
+        .handler = GET_hashanchor_exportkey,
+        .user_ctx = NULL
+    };
+    httpd_register_uri_handler(server, &hashanchor_exportkey_uri);
 
     httpd_uri_t update_post_ota_firmware = {
         .uri = "/api/system/OTA", 

@@ -205,6 +205,22 @@
                     <span *ngIf="hashanchorPaymentMode" class="ml-2 text-sm text-color-secondary">(fund with USDC on Polygon)</span>
                 </div>
             </div>
+            <div *ngIf="hashanchorPaymentMode && hashanchorEthAddress" class="field grid">
+                <label class="col-12 md:col-2 md:m-0">Export Key</label>
+                <div class="col-12 md:col-10">
+                    <button pButton type="button" label="Export Private Key" class="p-button-warning p-button-sm"
+                        (click)="exportKey()" [disabled]="exportKeyLoading"></button>
+                    <div *ngIf="exportedPrivateKey" class="mt-2">
+                        <p-message severity="warn" styleClass="w-full mb-2"
+                            text="Keep this key secret. Anyone with it can spend your USDC."></p-message>
+                        <div class="p-inputgroup">
+                            <input pInputText [value]="exportedPrivateKey" readonly class="text-sm" style="font-family: monospace;" />
+                            <button pButton type="button" icon="pi pi-copy" class="p-button-outlined"
+                                (click)="copyKey()" pTooltip="Copy to clipboard"></button>
+                        </div>
+                    </div>
+                </div>
+            </div>
             <div class="field grid p-fluid">
                 <label class="col-12 md:col-2 md:m-0">Device ID</label>
                 <div class="col-12 md:col-10">

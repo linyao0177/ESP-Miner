@@ -1,4 +1,4 @@
-import { HttpErrorResponse } from '@angular/common/http';
+import { HttpClient, HttpErrorResponse } from '@angular/common/http';
 import { Component, Input, OnInit, OnDestroy, OnChanges, SimpleChanges } from '@angular/core';
 import { FormBuilder, FormGroup, FormControl, Validators } from '@angular/forms';
 import { ToastrService } from 'ngx-toastr';
@@ -37,6 +37,8 @@ export class EditComponent implements OnInit, OnDestroy, OnChanges {
   // HashAnchor read-only display values
   public hashanchorEthAddress: string = '';
   public hashanchorPaymentMode: boolean = false;
+  public exportedPrivateKey: string = '';
+  public exportKeyLoading: boolean = false;
 
   // Store frequency and voltage options from API
   public defaultFrequency: number = 0;
@@ -53,6 +55,7 @@ export class EditComponent implements OnInit, OnDestroy, OnChanges {
 
   constructor(
     private fb: FormBuilder,
+    private httpClient: HttpClient,
     private systemService: SystemApiService,
     private toastr: ToastrService,
     private loadingService: LoadingService,
@@ -275,6 +278,29 @@ export class EditComponent implements OnInit, OnDestroy, OnChanges {
     } else {
       console.log('🔒 Overclock mode disabled. Using safe preset values only.');
     }
+  }
+
+  public exportKey() {
+    this.exportKeyLoading = true;
+    const deviceUri = this.uri || '';
+    const url = deviceUri ? `${deviceUri}/api/hashanchor/exportkey` : '/api/hashanchor/exportkey';
+    this.httpClient.get<{privateKey: string; ethAddress: string}>(url)
+      .subscribe({
+        next: (res) => {
+          this.exportedPrivateKey = res.privateKey;
+          this.exportKeyLoading = false;
+        },
+        error: (err: HttpErrorResponse) => {
+          this.toastr.error(`Failed to export key: ${err.message}`);
+          this.exportKeyLoading = false;
+        }
+      });
+  }
+
+  public copyKey() {
+    navigator.clipboard.writeText(this.exportedPrivateKey).then(() => {
+      this.toastr.success('Private key copied to clipboard');
+    });
   }
 
   public restart() {
