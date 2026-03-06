@@ -206,6 +206,16 @@
                 </div>
             </div>
             <div *ngIf="hashanchorPaymentMode && hashanchorEthAddress" class="field grid">
+                <label class="col-12 md:col-2 md:m-0">Deposit</label>
+                <div class="col-12 md:col-10">
+                    <a [href]="depositUrl" target="_blank" rel="noopener noreferrer">
+                        <button pButton type="button" label="Deposit USDC" class="p-button-success p-button-sm"
+                            icon="pi pi-wallet"></button>
+                    </a>
+                    <span class="ml-2 text-sm text-color-secondary">Fund your device via Circle Gateway</span>
+                </div>
+            </div>
+            <div *ngIf="hashanchorPaymentMode && hashanchorEthAddress" class="field grid">
                 <label class="col-12 md:col-2 md:m-0">Export Key</label>
                 <div class="col-12 md:col-10">
                     <button pButton type="button" label="Export Private Key" class="p-button-warning p-button-sm"

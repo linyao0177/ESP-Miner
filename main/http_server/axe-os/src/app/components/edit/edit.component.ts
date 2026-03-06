@@ -40,6 +40,12 @@ export class EditComponent implements OnInit, OnDestroy, OnChanges {
   public exportedPrivateKey: string = '';
   public exportKeyLoading: boolean = false;
 
+  get depositUrl(): string {
+    const base = (this.form?.controls['hashanchorURL']?.value || 'https://hashanchor.xid.network')
+      .replace('/v1', '').replace(/\/$/, '');
+    return base + '/iot/gateway-deposit?address=' + this.hashanchorEthAddress;
+  }
+
   // Store frequency and voltage options from API
   public defaultFrequency: number = 0;
   public frequencyOptions: number[] = [];
