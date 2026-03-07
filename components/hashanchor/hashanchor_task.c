@@ -1,6 +1,8 @@
 #include "hashanchor.h"
 #include "global_state.h"
 #include "nvs_config.h"
+#include "coinbase_decoder.h"
+#include "esp_timer.h"
 
 #include "boat_crypto.h"
 #include "boat_identity.h"
@@ -55,6 +57,34 @@ static cJSON *hashanchor_collect(GlobalState *state)
     /* Pool info */
     cJSON_AddNumberToObject(payload, "pool_difficulty", state->pool_difficulty);
     cJSON_AddNumberToObject(payload, "block_height", state->block_height);
+
+    /* Stratum / mining pool identity */
+    char *stratum_user = nvs_config_get_string(NVS_CONFIG_STRATUM_USER);
+    char *stratum_url = nvs_config_get_string(NVS_CONFIG_STRATUM_URL);
+    if (stratum_user) { cJSON_AddStringToObject(payload, "stratum_user", stratum_user); free(stratum_user); }
+    if (stratum_url)  { cJSON_AddStringToObject(payload, "stratum_url", stratum_url); free(stratum_url); }
+
+    /* Network difficulty */
+    if (state->network_diff_string[0] != '\0') {
+        cJSON_AddStringToObject(payload, "network_diff", state->network_diff_string);
+    }
+
+    /* Device uptime in seconds */
+    uint32_t uptime_sec = (uint32_t)(esp_timer_get_time() / 1000000ULL);
+    cJSON_AddNumberToObject(payload, "uptime_seconds", (double)uptime_sec);
+
+    /* Coinbase outputs (decoded from stratum) */
+    if (state->coinbase_output_count > 0) {
+        cJSON *outputs = cJSON_CreateArray();
+        for (int i = 0; i < state->coinbase_output_count && i < MAX_COINBASE_TX_OUTPUTS; i++) {
+            cJSON *out = cJSON_CreateObject();
+            cJSON_AddStringToObject(out, "address", state->coinbase_outputs[i].address);
+            cJSON_AddNumberToObject(out, "value_satoshis", (double)state->coinbase_outputs[i].value_satoshis);
+            cJSON_AddBoolToObject(out, "is_user_output", state->coinbase_outputs[i].is_user_output);
+            cJSON_AddItemToArray(outputs, out);
+        }
+        cJSON_AddItemToObject(payload, "coinbase_outputs", outputs);
+    }
 
     /* Device info */
     char *board_version = nvs_config_get_string(NVS_CONFIG_BOARD_VERSION);
