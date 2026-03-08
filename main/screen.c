@@ -382,16 +382,24 @@ static lv_obj_t * create_scr_x402_pay(const char * ip_addr) {
     x402_pay_label = lv_label_create(text_cont);
     lv_label_set_text(x402_pay_label, "Scan QR");
 
+    /* Build QR URL: prefer Bridge /p page, fallback to device IP */
+    char data[128];
+    char *bridge_url = nvs_config_get_string(NVS_CONFIG_CLAW_BRIDGE_URL);
+    if (bridge_url && strlen(bridge_url) > 0) {
+        snprintf(data, sizeof(data), "%s/p", bridge_url);
+    } else {
+        snprintf(data, sizeof(data), "http://%s/api/hashrate", ip_addr);
+    }
+    free(bridge_url);
+
     lv_obj_t *label3 = lv_label_create(text_cont);
-    lv_label_set_text_fmt(label3, "%s", ip_addr);
+    lv_label_set_text(label3, data);
 
     lv_obj_t * qr = lv_qrcode_create(scr);
     lv_qrcode_set_size(qr, 32);
     lv_qrcode_set_dark_color(qr, lv_color_black());
     lv_qrcode_set_light_color(qr, lv_color_white());
 
-    char data[80];
-    snprintf(data, sizeof(data), "http://%s/api/hashrate", ip_addr);
     lv_qrcode_update(qr, data, strlen(data));
 
     return scr;
