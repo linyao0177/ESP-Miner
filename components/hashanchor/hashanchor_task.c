@@ -1,4 +1,5 @@
 #include "hashanchor.h"
+#include "claw_task.h"
 #include "global_state.h"
 #include "nvs_config.h"
 #include "coinbase_decoder.h"
@@ -175,6 +176,9 @@ void hashanchor_task(void *pvParameters)
         free(device_id);
     }
 
+    /* Initialize Claw agent (x402 offers, heartbeat config) */
+    claw_init(&kp, state);
+
     while (1) {
         if (!nvs_config_get_bool(NVS_CONFIG_HASHANCHOR_ENABLED)) {
             vTaskDelay(pdMS_TO_TICKS(30000));
@@ -254,6 +258,18 @@ void hashanchor_task(void *pvParameters)
         cJSON_Delete(payload);
         free(json_str);
         free(metadata_json);
+
+        /* Run Claw heartbeat (green/credit/telegram) sequentially,
+         * sharing the TLS session to avoid mbedtls memory exhaustion. */
+        {
+            boat_config_t claw_cfg = {
+                .relay_url = url,
+                .api_key = api_key,
+                .device_id = device_id,
+            };
+            claw_heartbeat(state, &kp, &claw_cfg, &pay_req);
+        }
+
         free(url);
         free(api_key);
         free(device_id);

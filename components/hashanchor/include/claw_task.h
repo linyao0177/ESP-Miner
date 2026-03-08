@@ -2,23 +2,24 @@
 #define CLAW_TASK_H
 
 #include "global_state.h"
-#include "boat_x402.h"
+#include "boat_types.h"
+#include "boat_attest.h"
 
 /**
- * Claw Task — AI agent heartbeat & x402 offer handler
- *
- * Runs as a FreeRTOS task at priority 2, reading mining data
- * directly from GlobalState (no HTTP round-trip).
- *
- * Features:
- *   - Periodic heartbeat with anomaly detection (Case A)
- *   - Temperature-based auto-throttle (>75°C → reduce freq)
- *   - Green energy reporting via HashAnchor (Case C)
- *   - Credit archive logging (Case D)
- *   - x402 hashrate rental offer (Case B)
- *   - Telegram notifications
+ * Initialize claw agent: register x402 offer services.
+ * Called once from hashanchor_task after crypto init.
  */
-void claw_task(void *pvParameters);
+void claw_init(boat_keypair_t *kp, GlobalState *state);
+
+/**
+ * Run one claw heartbeat cycle (Cases A/C/D + Telegram).
+ * Called from hashanchor_task main loop after attestation submit,
+ * sharing the same TLS session to avoid mbedtls memory exhaustion.
+ */
+void claw_heartbeat(GlobalState *state,
+                     boat_keypair_t *kp,
+                     boat_config_t *cfg,
+                     boat_pay_requirements_t *pay_req);
 
 /**
  * Handle an x402 offer request from the HTTP server.
