@@ -42,6 +42,7 @@ SRCS
     "./power/vcore.c"
     "./power/asic_reset.c"
     "./power/asic_init.c"
+    "ble_x402.c"
 
 INCLUDE_DIRS
     "."
@@ -75,6 +76,7 @@ PRIV_REQUIRES
     "esp_driver_i2c"
     "tcp_transport"
     "hashanchor"
+    "bt"
 
 EMBED_FILES "http_server/recovery_page.html"
 )

@@ -24,6 +24,7 @@ typedef enum {
     SCR_STATS,
     SCR_MINING,
     SCR_WIFI,
+    SCR_X402_PAY,
     MAX_SCREENS,
 } screen_t;
 
@@ -37,7 +38,7 @@ extern const lv_img_dsc_t osmu_logo;
 extern const lv_img_dsc_t identify_text;
 
 static lv_obj_t * screens[MAX_SCREENS];
-static int delays_ms[MAX_SCREENS] = {0, 0, 0, 0, 0, 1000, 3000, 3000, 10000, 10000, 10000, 10000};
+static int delays_ms[MAX_SCREENS] = {0, 0, 0, 0, 0, 1000, 3000, 3000, 10000, 10000, 10000, 10000, 10000};
 
 static int current_screen_time_ms;
 static int current_screen_delay_ms;
@@ -75,6 +76,8 @@ static lv_obj_t *stats_temp_label;
 static lv_obj_t *wifi_rssi_value_label;
 static lv_obj_t *wifi_signal_strength_label;
 static lv_obj_t *wifi_uptime_label;
+
+static lv_obj_t *x402_pay_label;
 
 static lv_obj_t *notification_label;
 static lv_obj_t *identify_image;
@@ -361,6 +364,39 @@ static lv_obj_t * create_scr_wifi() {
     return scr;
 }
 
+static lv_obj_t * create_scr_x402_pay(const char * ip_addr) {
+    lv_obj_t * scr = lv_obj_create(NULL);
+    lv_obj_set_flex_flow(scr, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(scr, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(scr, 2, LV_PART_MAIN);
+
+    lv_obj_t * text_cont = lv_obj_create(scr);
+    lv_obj_set_flex_flow(text_cont, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(text_cont, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_set_flex_grow(text_cont, 1);
+    lv_obj_set_height(text_cont, LV_VER_RES);
+
+    lv_obj_t *label1 = lv_label_create(text_cont);
+    lv_label_set_text(label1, "x402 PAY");
+
+    x402_pay_label = lv_label_create(text_cont);
+    lv_label_set_text(x402_pay_label, "Scan QR");
+
+    lv_obj_t *label3 = lv_label_create(text_cont);
+    lv_label_set_text_fmt(label3, "%s", ip_addr);
+
+    lv_obj_t * qr = lv_qrcode_create(scr);
+    lv_qrcode_set_size(qr, 32);
+    lv_qrcode_set_dark_color(qr, lv_color_black());
+    lv_qrcode_set_light_color(qr, lv_color_white());
+
+    char data[80];
+    snprintf(data, sizeof(data), "http://%s/api/hashrate", ip_addr);
+    lv_qrcode_update(qr, data, strlen(data));
+
+    return scr;
+}
+
 static void scr_create_overlay()
 {
     identify_image = lv_img_create(lv_layer_top());
@@ -634,7 +670,15 @@ static void screen_update_cb(lv_timer_t * timer)
     screen_next();
 }
 
-void screen_button_press() 
+void screen_x402_show_paid(const char * amount)
+{
+    if (x402_pay_label && lvgl_port_lock(0)) {
+        lv_label_set_text_fmt(x402_pay_label, "PAID %s", amount);
+        lvgl_port_unlock();
+    }
+}
+
+void screen_button_press()
 {
     if (GLOBAL_STATE->SYSTEM_MODULE.identify_mode_time_ms > 0) {
         GLOBAL_STATE->SYSTEM_MODULE.identify_mode_time_ms = 0;
@@ -695,6 +739,7 @@ esp_err_t screen_start(void * pvParameters)
             screens[SCR_STATS] = create_scr_stats();
             screens[SCR_MINING] = create_scr_mining();
             screens[SCR_WIFI] = create_scr_wifi();
+            screens[SCR_X402_PAY] = create_scr_x402_pay(SYSTEM_MODULE->ip_addr_str);
 
             scr_create_overlay();
 

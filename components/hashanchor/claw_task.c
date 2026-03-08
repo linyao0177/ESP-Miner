@@ -8,6 +8,7 @@
 #include "boat_pay.h"
 #include "boat_x402.h"
 #include "boat_claw.h"
+#include "boat_pal.h"
 
 #include "esp_log.h"
 
@@ -20,6 +21,66 @@ static const char *TAG = "claw";
 
 /* ---- Shared state for x402 offer handler ---- */
 static boat_keypair_t *g_claw_kp = NULL;
+
+/* ================================================================
+ * Telegram via Bridge (avoids direct api.telegram.org from ESP32)
+ * POST http://<bridge>/telegram/send with JSON body
+ * ================================================================ */
+
+static void claw_send_telegram(const char *message)
+{
+    char *tg_token = nvs_config_get_string(NVS_CONFIG_CLAW_TELEGRAM_TOKEN);
+    char *tg_chat  = nvs_config_get_string(NVS_CONFIG_CLAW_TELEGRAM_CHAT);
+    char *bridge   = nvs_config_get_string(NVS_CONFIG_CLAW_BRIDGE_URL);
+
+    if (!tg_token || strlen(tg_token) == 0 || !tg_chat || strlen(tg_chat) == 0) {
+        goto cleanup;
+    }
+
+    if (bridge && strlen(bridge) > 0) {
+        /* Route via Python Bridge (LAN HTTP, no TLS needed) */
+        char url[256];
+        snprintf(url, sizeof(url), "%s/telegram/send", bridge);
+
+        /* Simple JSON escape for message */
+        char *safe = (char *)malloc(strlen(message) * 2 + 1);
+        if (!safe) goto cleanup;
+        size_t j = 0;
+        for (size_t i = 0; message[i]; i++) {
+            if (message[i] == '"') { safe[j++] = '\\'; safe[j++] = '"'; }
+            else if (message[i] == '\n') { safe[j++] = '\\'; safe[j++] = 'n'; }
+            else { safe[j++] = message[i]; }
+        }
+        safe[j] = '\0';
+
+        char *body = (char *)malloc(strlen(safe) + 256);
+        if (!body) { free(safe); goto cleanup; }
+        snprintf(body, strlen(safe) + 256,
+            "{\"bot_token\":\"%s\",\"chat_id\":\"%s\",\"text\":\"%s\"}",
+            tg_token, tg_chat, safe);
+        free(safe);
+
+        int status = 0;
+        char resp[128] = {0};
+        boat_err_t err = boat_pal_http_post(url, NULL, "application/json",
+                                             body, &status, resp, sizeof(resp));
+        free(body);
+
+        if (err == BOAT_OK && status == 200) {
+            ESP_LOGI(TAG, "Telegram sent via bridge");
+        } else {
+            ESP_LOGW(TAG, "Telegram via bridge failed: HTTP %d", status);
+        }
+    } else {
+        /* Direct (may fail in regions blocking api.telegram.org) */
+        boat_claw_telegram_send(tg_token, tg_chat, message);
+    }
+
+cleanup:
+    free(tg_token);
+    free(tg_chat);
+    free(bridge);
+}
 
 /* ================================================================
  * Direct GlobalState -> boat_claw_axeos_stats_t
@@ -72,20 +133,14 @@ static boat_err_t hashrate_rental_callback(const char *buyer,
     ESP_LOGI(TAG, "Hashrate rental paid by %s (tx: %s, amount: %" PRIu64 ")",
              buyer, tx_hash, amount);
 
-    char *tg_token = nvs_config_get_string(NVS_CONFIG_CLAW_TELEGRAM_TOKEN);
-    char *tg_chat  = nvs_config_get_string(NVS_CONFIG_CLAW_TELEGRAM_CHAT);
-    if (tg_token && strlen(tg_token) > 0 && tg_chat && strlen(tg_chat) > 0) {
-        char msg[256];
-        snprintf(msg, sizeof(msg),
-            "*Hashrate Rental*\n"
-            "Buyer: %.10s...\n"
-            "Amount: %" PRIu64 "\n"
-            "TX: %.10s...",
-            buyer, amount, tx_hash);
-        boat_claw_telegram_send(tg_token, tg_chat, msg);
-    }
-    free(tg_token);
-    free(tg_chat);
+    char msg[256];
+    snprintf(msg, sizeof(msg),
+        "*Hashrate Rental*\n"
+        "Buyer: %.10s...\n"
+        "Amount: %" PRIu64 "\n"
+        "TX: %.10s...",
+        buyer, amount, tx_hash);
+    claw_send_telegram(msg);
 
     return BOAT_OK;
 }
@@ -99,20 +154,28 @@ void claw_init(boat_keypair_t *kp, GlobalState *state)
     g_claw_kp = kp;
 
     if (nvs_config_get_bool(NVS_CONFIG_CLAW_ENABLE_RENTAL)) {
+        char *x402_network = nvs_config_get_string(NVS_CONFIG_CLAW_X402_NETWORK);
+        char *x402_asset   = nvs_config_get_string(NVS_CONFIG_CLAW_X402_ASSET);
+        uint64_t x402_amount = nvs_config_get_u64(NVS_CONFIG_CLAW_X402_AMOUNT);
+        if (x402_amount == 0) x402_amount = 100000;
+
         boat_x402_offer_service_t rental = {
             .path = "/hashrate",
             .description = "Bitaxe 601 hashrate rental (1 TH/s, 1 hour)",
-            .network = "base-sepolia",
-            .asset = "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
-            .amount = 100000,
+            .network = x402_network ? x402_network : "eip155:84532",
+            .asset = x402_asset ? x402_asset : "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+            .amount = x402_amount,
             .validity_seconds = 3600,
             .on_payment_verified = hashrate_rental_callback,
             .user_data = state,
         };
 
         if (boat_x402_offer_register(kp, &rental) == BOAT_OK) {
-            ESP_LOGI(TAG, "x402 offer registered: /hashrate (0.1 USDC)");
+            ESP_LOGI(TAG, "x402 offer registered: /hashrate (%" PRIu64 " on %s)",
+                     x402_amount, rental.network);
         }
+        /* Note: x402_network/x402_asset strings are kept alive —
+           they are referenced by the service registry for the device lifetime */
     }
 
     ESP_LOGI(TAG, "Claw agent initialized");
@@ -151,17 +214,11 @@ void claw_heartbeat(GlobalState *state,
             boat_claw_axeos_set_freq(safe_freq);
         }
 
-        char *tg_token = nvs_config_get_string(NVS_CONFIG_CLAW_TELEGRAM_TOKEN);
-        char *tg_chat  = nvs_config_get_string(NVS_CONFIG_CLAW_TELEGRAM_CHAT);
-        if (tg_token && strlen(tg_token) > 0 && tg_chat && strlen(tg_chat) > 0) {
-            char alert[256];
-            snprintf(alert, sizeof(alert),
-                "*ALERT* Temp %.1f°C > 75°C, freq reduced to %" PRIu32 " MHz",
-                stats.temperature, safe_freq);
-            boat_claw_telegram_send(tg_token, tg_chat, alert);
-        }
-        free(tg_token);
-        free(tg_chat);
+        char alert[256];
+        snprintf(alert, sizeof(alert),
+            "*ALERT* Temp %.1f°C > 75°C, freq reduced to %" PRIu32 " MHz",
+            stats.temperature, safe_freq);
+        claw_send_telegram(alert);
     }
 
     /* ---- kWh calculation ---- */
@@ -220,9 +277,7 @@ void claw_heartbeat(GlobalState *state,
     }
 
     /* ---- Telegram periodic report ---- */
-    char *tg_token = nvs_config_get_string(NVS_CONFIG_CLAW_TELEGRAM_TOKEN);
-    char *tg_chat  = nvs_config_get_string(NVS_CONFIG_CLAW_TELEGRAM_CHAT);
-    if (tg_token && strlen(tg_token) > 0 && tg_chat && strlen(tg_chat) > 0) {
+    {
         char msg[512];
         snprintf(msg, sizeof(msg),
             "*Bitaxe Heartbeat*\n"
@@ -239,10 +294,8 @@ void claw_heartbeat(GlobalState *state,
             stats.uptime_seconds / 3600,
             (stats.uptime_seconds % 3600) / 60,
             stats.shares_accepted, stats.shares_rejected);
-        boat_claw_telegram_send(tg_token, tg_chat, msg);
+        claw_send_telegram(msg);
     }
-    free(tg_token);
-    free(tg_chat);
 }
 
 /* ================================================================

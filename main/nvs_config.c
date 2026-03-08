@@ -124,6 +124,10 @@ static Settings settings[NVS_CONFIG_COUNT] = {
     [NVS_CONFIG_CLAW_ENABLE_GREEN]                    = {.nvs_key_name = "claw_green",     .type = TYPE_BOOL,  .default_value = {.b = false},                                         .rest_name = "clawEnableGreen",                    .min = 0,  .max = 1},
     [NVS_CONFIG_CLAW_ENABLE_CREDIT]                   = {.nvs_key_name = "claw_credit",    .type = TYPE_BOOL,  .default_value = {.b = false},                                         .rest_name = "clawEnableCredit",                   .min = 0,  .max = 1},
     [NVS_CONFIG_CLAW_ENABLE_RENTAL]                   = {.nvs_key_name = "claw_rental",    .type = TYPE_BOOL,  .default_value = {.b = false},                                         .rest_name = "clawEnableRental",                   .min = 0,  .max = 1},
+    [NVS_CONFIG_CLAW_BRIDGE_URL]                      = {.nvs_key_name = "claw_bridge",    .type = TYPE_STR,   .default_value = {.str = ""},                                          .rest_name = "clawBridgeUrl",                      .min = 0,  .max = NVS_STR_LIMIT},
+    [NVS_CONFIG_CLAW_X402_NETWORK]                    = {.nvs_key_name = "claw_x402net",   .type = TYPE_STR,   .default_value = {.str = "eip155:84532"},                              .rest_name = "clawX402Network",                    .min = 0,  .max = NVS_STR_LIMIT},
+    [NVS_CONFIG_CLAW_X402_ASSET]                      = {.nvs_key_name = "claw_x402ast",   .type = TYPE_STR,   .default_value = {.str = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"},.rest_name = "clawX402Asset",                      .min = 0,  .max = NVS_STR_LIMIT},
+    [NVS_CONFIG_CLAW_X402_AMOUNT]                     = {.nvs_key_name = "claw_x402amt",   .type = TYPE_U64,   .default_value = {.u64 = 100000},                                      .rest_name = "clawX402Amount",                     .min = 0,  .max = 0},
 };
 
 Settings *nvs_config_get_settings(NvsConfigKey key)

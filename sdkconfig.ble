@@ -1,0 +1,26 @@
+# BLE x402 Near-Field Payment Configuration
+# To enable BLE on Bitaxe 601, add these to sdkconfig or run:
+#   cp sdkconfig.ble sdkconfig.defaults.ble
+# Then rebuild: idf.py build
+
+# Enable Bluetooth
+CONFIG_BT_ENABLED=y
+
+# Use NimBLE (lightweight BLE-only stack, ~60KB smaller than Bluedroid)
+CONFIG_BT_NIMBLE_ENABLED=y
+
+# NimBLE configuration
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
+CONFIG_BT_NIMBLE_MAX_BONDS=0
+CONFIG_BT_NIMBLE_PINNED_TO_CORE=0
+CONFIG_BT_NIMBLE_ROLE_CENTRAL=n
+CONFIG_BT_NIMBLE_ROLE_OBSERVER=n
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y
+CONFIG_BT_NIMBLE_ROLE_BROADCASTER=y
+CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y
+
+# GAP device name
+CONFIG_BT_NIMBLE_GAP_DEVICE_NAME_MAX_LEN=31
+
+# Increase MTU for JSON payloads
+CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=512
