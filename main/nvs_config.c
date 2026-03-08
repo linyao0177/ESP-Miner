@@ -116,6 +116,14 @@ static Settings settings[NVS_CONFIG_COUNT] = {
     [NVS_CONFIG_HASHANCHOR_INTERVAL]                   = {.nvs_key_name = "ha_interval",     .type = TYPE_U16,   .default_value = {.u16 = 300},                                         .rest_name = "hashanchorInterval",                 .min = 60, .max = UINT16_MAX},
     [NVS_CONFIG_HASHANCHOR_DEVICE_ID]                  = {.nvs_key_name = "ha_devid",        .type = TYPE_STR,   .default_value = {.str = ""},                                          .rest_name = "hashanchorDeviceId",                 .min = 0,  .max = NVS_STR_LIMIT},
     [NVS_CONFIG_HASHANCHOR_ETH_ADDRESS]                = {.nvs_key_name = "ha_ethaddr",      .type = TYPE_STR,   .default_value = {.str = ""},                                          .rest_name = NULL,                                 .min = 0,  .max = NVS_STR_LIMIT},
+
+    [NVS_CONFIG_CLAW_ENABLED]                         = {.nvs_key_name = "claw_enabled",   .type = TYPE_BOOL,  .default_value = {.b = false},                                         .rest_name = "clawEnabled",                        .min = 0,  .max = 1},
+    [NVS_CONFIG_CLAW_INTERVAL]                        = {.nvs_key_name = "claw_interval",  .type = TYPE_U16,   .default_value = {.u16 = 1800},                                        .rest_name = "clawInterval",                       .min = 60, .max = UINT16_MAX},
+    [NVS_CONFIG_CLAW_TELEGRAM_TOKEN]                  = {.nvs_key_name = "claw_tg_token",  .type = TYPE_STR,   .default_value = {.str = ""},                                          .rest_name = "clawTelegramToken",                  .min = 0,  .max = NVS_STR_LIMIT},
+    [NVS_CONFIG_CLAW_TELEGRAM_CHAT]                   = {.nvs_key_name = "claw_tg_chat",   .type = TYPE_STR,   .default_value = {.str = ""},                                          .rest_name = "clawTelegramChat",                   .min = 0,  .max = NVS_STR_LIMIT},
+    [NVS_CONFIG_CLAW_ENABLE_GREEN]                    = {.nvs_key_name = "claw_green",     .type = TYPE_BOOL,  .default_value = {.b = false},                                         .rest_name = "clawEnableGreen",                    .min = 0,  .max = 1},
+    [NVS_CONFIG_CLAW_ENABLE_CREDIT]                   = {.nvs_key_name = "claw_credit",    .type = TYPE_BOOL,  .default_value = {.b = false},                                         .rest_name = "clawEnableCredit",                   .min = 0,  .max = 1},
+    [NVS_CONFIG_CLAW_ENABLE_RENTAL]                   = {.nvs_key_name = "claw_rental",    .type = TYPE_BOOL,  .default_value = {.b = false},                                         .rest_name = "clawEnableRental",                   .min = 0,  .max = 1},
 };
 
 Settings *nvs_config_get_settings(NvsConfigKey key)

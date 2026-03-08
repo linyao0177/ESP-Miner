@@ -22,6 +22,7 @@
 #include "asic_reset.h"
 #include "asic_init.h"
 #include "hashanchor.h"
+#include "claw_task.h"
 
 static GlobalState GLOBAL_STATE;
 
@@ -132,5 +133,8 @@ void app_main(void)
     }
     if (xTaskCreate(hashanchor_task, "hashanchor", 24576, (void *) &GLOBAL_STATE, 3, NULL) != pdPASS) {
         ESP_LOGE(TAG, "Error creating hashanchor task");
+    }
+    if (xTaskCreate(claw_task, "claw", 16384, (void *) &GLOBAL_STATE, 2, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "Error creating claw task");
     }
 }

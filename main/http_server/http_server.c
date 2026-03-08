@@ -37,6 +37,7 @@
 #include "nvs_config.h"
 #include "nvs.h"
 #include "boat_crypto.h"
+#include "claw_task.h"
 #include "vcore.h"
 #include "connect.h"
 #include "asic.h"
@@ -1348,6 +1349,55 @@ static esp_err_t GET_hashanchor_exportkey(httpd_req_t * req)
     return ESP_OK;
 }
 
+/* ---- x402 offer endpoint handler ---- */
+static esp_err_t handle_x402_request(httpd_req_t *req)
+{
+    if (is_network_allowed(req) != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    if (set_cors_headers(req) != ESP_OK) {
+        httpd_resp_send_500(req);
+        return ESP_OK;
+    }
+
+    /* Extract service path from URI: /api/x402/hashrate → /hashrate */
+    const char *uri = req->uri;
+    const char *service_path = uri + 9; /* skip "/api/x402" */
+    if (strlen(service_path) == 0) service_path = "/";
+
+    /* Read X-PAYMENT header */
+    char x_payment[1024] = {0};
+    const char *payment_header = NULL;
+    if (httpd_req_get_hdr_value_len(req, "X-PAYMENT") > 0) {
+        httpd_req_get_hdr_value_str(req, "X-PAYMENT", x_payment, sizeof(x_payment));
+        payment_header = x_payment;
+    }
+
+    char *body = NULL;
+    size_t body_len = 0;
+    int status = claw_x402_handle_request(service_path, payment_header, &body, &body_len);
+
+    if (status == 402) {
+        httpd_resp_set_status(req, "402 Payment Required");
+    } else if (status == 404) {
+        httpd_resp_set_status(req, "404 Not Found");
+    } else if (status == 500) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+    }
+    /* 200 is default */
+
+    if (body && body_len > 0) {
+        httpd_resp_send(req, body, body_len);
+        free(body);
+    } else {
+        httpd_resp_send(req, "{}", 2);
+    }
+
+    return ESP_OK;
+}
+
 esp_err_t start_rest_server(void * pvParameters)
 {
     GLOBAL_STATE = (GlobalState *) pvParameters;
@@ -1372,7 +1422,7 @@ esp_err_t start_rest_server(void * pvParameters)
     config.uri_match_fn = httpd_uri_match_wildcard;
     config.stack_size = 8192;
     config.max_open_sockets = 20;
-    config.max_uri_handlers = 24;
+    config.max_uri_handlers = 26;
     config.close_fn = websocket_close_fn;
     config.lru_purge_enable = true;
 
@@ -1480,6 +1530,22 @@ esp_err_t start_rest_server(void * pvParameters)
         .user_ctx = NULL
     };
     httpd_register_uri_handler(server, &hashanchor_exportkey_uri);
+
+    /* x402 offer endpoints (GET and POST for payment flow) */
+    httpd_uri_t x402_get_uri = {
+        .uri = "/api/x402/*",
+        .method = HTTP_GET,
+        .handler = handle_x402_request,
+        .user_ctx = rest_context
+    };
+    httpd_register_uri_handler(server, &x402_get_uri);
+    httpd_uri_t x402_post_uri = {
+        .uri = "/api/x402/*",
+        .method = HTTP_POST,
+        .handler = handle_x402_request,
+        .user_ctx = rest_context
+    };
+    httpd_register_uri_handler(server, &x402_post_uri);
 
     httpd_uri_t update_post_ota_firmware = {
         .uri = "/api/system/OTA", 

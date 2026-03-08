@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "hashanchor_task.c"
+        "claw_task.c"
 
     INCLUDE_DIRS
         "include"
