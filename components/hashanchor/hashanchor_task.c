@@ -164,6 +164,7 @@ void hashanchor_task(void *pvParameters)
     /* Cached payment requirements (persists across loop iterations) */
     boat_pay_requirements_t pay_req;
     memset(&pay_req, 0, sizeof(pay_req));
+    char cached_pay_chain[16] = {0}; /* track chain to invalidate cache on change */
 
     /* Auto-register device (only when enabled and configured) */
     if (nvs_config_get_bool(NVS_CONFIG_HASHANCHOR_ENABLED)) {
@@ -250,45 +251,45 @@ void hashanchor_task(void *pvParameters)
 
         /* Submit to HashAnchor with telemetry as metadata */
         char *metadata_json = cJSON_PrintUnformatted(payload);
+
+        /* Read pay_chain setting for payment mode */
+        char *pay_chain = nvs_config_get_string(NVS_CONFIG_CLAW_PAY_CHAIN);
+        const char *chain = (pay_chain && strlen(pay_chain) > 0) ? pay_chain : "arc";
+
+        /* Invalidate cached requirements if chain changed */
+        if (strcmp(chain, cached_pay_chain) != 0) {
+            if (cached_pay_chain[0]) {
+                ESP_LOGI(TAG, "Pay chain changed: %s → %s, resetting cache", cached_pay_chain, chain);
+            }
+            memset(&pay_req, 0, sizeof(pay_req));
+            strncpy(cached_pay_chain, chain, sizeof(cached_pay_chain) - 1);
+        }
+
         boat_config_t cfg = {
             .relay_url = url,
             .api_key = api_key,
             .device_id = device_id,
+            .pay_chain = chain,
         };
 
         if (payment_mode) {
-            /* Payment mode: check pay_chain setting */
-            char *pay_chain = nvs_config_get_string(NVS_CONFIG_CLAW_PAY_CHAIN);
-            const char *chain = (pay_chain && strlen(pay_chain) > 0) ? pay_chain : "arc";
-
             s_diag.attempt_count++;
             s_diag.last_attempt = (uint32_t)time(NULL);
 
-            if (strcmp(chain, "solana") == 0) {
-                /* Solana USDC payment */
-                err = boat_attest_submit_paid_chain(&cfg, &kp, &att, metadata_json,
-                                                     "solana", 1 /* devnet */);
-                if (err == BOAT_OK) {
-                    ESP_LOGI(TAG, "Solana paid attestation submitted");
-                    s_diag.success_count++;
-                } else {
-                    ESP_LOGW(TAG, "Solana paid attestation failed: %d", err);
-                }
+            /* All EVM chains use the same x402 nanopayment flow.
+             * The server returns chain-specific 402 based on payChain in body. */
+            err = boat_attest_submit_paid(&cfg, &kp, &att, metadata_json, &pay_req);
+            if (err == BOAT_OK) {
+                ESP_LOGI(TAG, "Paid attestation submitted (chain=%s)", chain);
+                s_diag.success_count++;
             } else {
-                /* Default: EVM (ARC/Polygon) EIP-3009 payment */
-                err = boat_attest_submit_paid(&cfg, &kp, &att, metadata_json, &pay_req);
-                if (err == BOAT_OK) {
-                    ESP_LOGI(TAG, "EVM paid attestation submitted");
-                    s_diag.success_count++;
-                } else {
-                    ESP_LOGW(TAG, "EVM paid attestation failed: %d", err);
-                }
+                ESP_LOGW(TAG, "Paid attestation failed: %d (chain=%s)", err, chain);
             }
+
             s_diag.last_err = (int)err;
             s_diag.last_http_status = pay_req.last_http_status;
             strncpy(s_diag.last_response, pay_req.last_response, sizeof(s_diag.last_response) - 1);
             s_diag.last_response[sizeof(s_diag.last_response) - 1] = '\0';
-            free(pay_chain);
         } else {
             /* API Key mode: existing flow */
             err = boat_attest_submit(&cfg, &kp, &att, metadata_json);
@@ -303,15 +304,9 @@ void hashanchor_task(void *pvParameters)
 
         /* Run Claw heartbeat (green/credit/telegram) sequentially,
          * sharing the TLS session to avoid mbedtls memory exhaustion. */
-        {
-            boat_config_t claw_cfg = {
-                .relay_url = url,
-                .api_key = api_key,
-                .device_id = device_id,
-            };
-            claw_heartbeat(state, &kp, &claw_cfg, &pay_req);
-        }
+        claw_heartbeat(state, &kp, &cfg, &pay_req);
 
+        free(pay_chain);
         free(url);
         free(api_key);
         free(device_id);
