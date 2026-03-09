@@ -9,6 +9,7 @@
 #include "boat_identity.h"
 #include "boat_attest.h"
 #include "boat_pay.h"
+#include "boat_solana.h"
 
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -19,6 +20,13 @@
 #include <time.h>
 
 static const char *TAG = "ha_task";
+
+/* Diagnostic state (readable via HTTP API) */
+static hashanchor_diag_t s_diag = {0};
+
+const hashanchor_diag_t *hashanchor_get_diag(void) {
+    return &s_diag;
+}
 
 /* Polygon USDC contract address */
 static const uint8_t USDC_CONTRACT[20] = {
@@ -93,6 +101,11 @@ static cJSON *hashanchor_collect(GlobalState *state)
     if (board_version) { cJSON_AddStringToObject(payload, "board_version", board_version); free(board_version); }
     if (asic_model)    { cJSON_AddStringToObject(payload, "asic_model", asic_model); free(asic_model); }
 
+    /* Payment chain info */
+    char *pay_chain = nvs_config_get_string(NVS_CONFIG_CLAW_PAY_CHAIN);
+    cJSON_AddStringToObject(payload, "pay_chain", pay_chain ? pay_chain : "arc");
+    free(pay_chain);
+
     return payload;
 }
 
@@ -135,10 +148,14 @@ void hashanchor_task(void *pvParameters)
         return;
     }
 
-    ESP_LOGI(TAG, "boat-mwr initialized. Ed25519 PK: %s, ETH: %s",
-             kp.ed25519_pk_hex, kp.eth_addr_hex);
+    /* Derive Solana address (base58 of Ed25519 pubkey) */
+    char sol_addr[64];
+    boat_base58_encode(kp.ed25519_pk, 32, sol_addr, sizeof(sol_addr));
 
-    /* Persist ETH address to main NVS so HTTP server can expose it */
+    ESP_LOGI(TAG, "boat-mwr initialized. ETH: %s, SOL: %s",
+             kp.eth_addr_hex, sol_addr);
+
+    /* Persist addresses to main NVS so HTTP server can expose them */
     nvs_config_set_string(NVS_CONFIG_HASHANCHOR_ETH_ADDRESS, kp.eth_addr_hex);
 
     /* Initialize EIP-712 domain for Polygon USDC (needed for payment mode) */
@@ -240,13 +257,38 @@ void hashanchor_task(void *pvParameters)
         };
 
         if (payment_mode) {
-            /* Payment mode: submit with USDC payment (EIP-3009) */
-            err = boat_attest_submit_paid(&cfg, &kp, &att, metadata_json, &pay_req);
-            if (err == BOAT_OK) {
-                ESP_LOGI(TAG, "Paid attestation submitted successfully");
+            /* Payment mode: check pay_chain setting */
+            char *pay_chain = nvs_config_get_string(NVS_CONFIG_CLAW_PAY_CHAIN);
+            const char *chain = (pay_chain && strlen(pay_chain) > 0) ? pay_chain : "arc";
+
+            s_diag.attempt_count++;
+            s_diag.last_attempt = (uint32_t)time(NULL);
+
+            if (strcmp(chain, "solana") == 0) {
+                /* Solana USDC payment */
+                err = boat_attest_submit_paid_chain(&cfg, &kp, &att, metadata_json,
+                                                     "solana", 1 /* devnet */);
+                if (err == BOAT_OK) {
+                    ESP_LOGI(TAG, "Solana paid attestation submitted");
+                    s_diag.success_count++;
+                } else {
+                    ESP_LOGW(TAG, "Solana paid attestation failed: %d", err);
+                }
             } else {
-                ESP_LOGW(TAG, "Paid attestation submit failed: %d", err);
+                /* Default: EVM (ARC/Polygon) EIP-3009 payment */
+                err = boat_attest_submit_paid(&cfg, &kp, &att, metadata_json, &pay_req);
+                if (err == BOAT_OK) {
+                    ESP_LOGI(TAG, "EVM paid attestation submitted");
+                    s_diag.success_count++;
+                } else {
+                    ESP_LOGW(TAG, "EVM paid attestation failed: %d", err);
+                }
             }
+            s_diag.last_err = (int)err;
+            s_diag.last_http_status = pay_req.last_http_status;
+            strncpy(s_diag.last_response, pay_req.last_response, sizeof(s_diag.last_response) - 1);
+            s_diag.last_response[sizeof(s_diag.last_response) - 1] = '\0';
+            free(pay_chain);
         } else {
             /* API Key mode: existing flow */
             err = boat_attest_submit(&cfg, &kp, &att, metadata_json);

@@ -36,4 +36,31 @@ int claw_x402_handle_request(const char *path,
                               char **out_body,
                               size_t *out_len);
 
+/**
+ * Solana: return device wallet info (address, ATAs, DID).
+ * GET /api/solana/info
+ */
+int claw_solana_info(char **out_body, size_t *out_len);
+
+/**
+ * Solana: execute USDC transfer.
+ * POST /api/solana/pay  { recipient, amount, devnet }
+ */
+int claw_solana_pay(const char *recipient_b58, uint64_t amount,
+                     int devnet, char **out_body, size_t *out_len);
+
+/**
+ * Lightning: create BOLT11 invoice via bridge.
+ * POST /api/lightning/invoice  { amount, memo }
+ */
+int claw_lightning_invoice(uint64_t amount_sats, const char *memo,
+                            char **out_body, size_t *out_len);
+
+/**
+ * Lightning: check payment status via bridge.
+ * GET /api/lightning/check/<payment_hash>
+ */
+int claw_lightning_check(const char *payment_hash,
+                          char **out_body, size_t *out_len);
+
 #endif /* CLAW_TASK_H */

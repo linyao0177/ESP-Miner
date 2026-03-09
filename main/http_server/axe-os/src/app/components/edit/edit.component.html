@@ -243,6 +243,57 @@
                     <input pInputText formControlName="hashanchorInterval" type="number" min="60" />
                 </div>
             </div>
+
+            <h4 class="mt-4 mb-2">Payment Chain</h4>
+            <div class="field grid p-fluid">
+                <label class="col-12 md:col-2 md:m-0">Chain</label>
+                <div class="col-12 md:col-10">
+                    <p-dropdown formControlName="clawPayChain"
+                        [options]="payChainOptions" optionLabel="label" optionValue="value"
+                        placeholder="Select payment chain"></p-dropdown>
+                </div>
+            </div>
+            <div *ngIf="form.controls['clawPayChain'].value === 'arc'" class="field grid">
+                <label class="col-12 md:col-2 md:m-0">Network</label>
+                <div class="col-12 md:col-10">
+                    <span class="p-tag p-tag-info">EVM (Polygon / Base Sepolia)</span>
+                    <span class="ml-2 text-sm text-color-secondary">EIP-3009 USDC TransferWithAuthorization</span>
+                </div>
+            </div>
+            <div *ngIf="form.controls['clawPayChain'].value === 'solana'" class="field grid">
+                <label class="col-12 md:col-2 md:m-0">Network</label>
+                <div class="col-12 md:col-10">
+                    <span class="p-tag" style="background:#9945FF;color:#fff">Solana</span>
+                    <span class="ml-2 text-sm text-color-secondary">SPL Token Transfer (USDC)</span>
+                </div>
+            </div>
+            <div *ngIf="form.controls['clawPayChain'].value === 'lightning'" class="field grid">
+                <label class="col-12 md:col-2 md:m-0">Network</label>
+                <div class="col-12 md:col-10">
+                    <span class="p-tag p-tag-warning">Lightning Network</span>
+                    <span class="ml-2 text-sm text-color-secondary">BOLT11 Invoice (LNbits)</span>
+                </div>
+            </div>
+
+            <div class="field-checkbox grid my-2">
+                <div class="col-1 md:col-10 md:flex-order-2">
+                    <p-checkbox formControlName="clawEnabled" inputId="clawEnabled" [binary]="true"></p-checkbox>
+                </div>
+                <label for="clawEnabled" class="col-11 m-0 pl-3 md:col-2 md:flex-order-1 md:p-2">Enable Agent</label>
+            </div>
+            <div class="field-checkbox grid my-2">
+                <div class="col-1 md:col-10 md:flex-order-2">
+                    <p-checkbox formControlName="clawEnableRental" inputId="clawEnableRental" [binary]="true"></p-checkbox>
+                </div>
+                <label for="clawEnableRental" class="col-11 m-0 pl-3 md:col-2 md:flex-order-1 md:p-2">Enable x402 Rental</label>
+            </div>
+            <div *ngIf="form.controls['clawPayChain'].value === 'lightning'" class="field grid p-fluid">
+                <label class="col-12 md:col-2 md:m-0">Bridge URL</label>
+                <div class="col-12 md:col-10">
+                    <input pInputText formControlName="clawBridgeUrl" type="text" placeholder="http://192.168.1.x:8080" />
+                    <span class="text-sm text-color-secondary">LNbits proxy for Lightning invoices</span>
+                </div>
+            </div>
         </div>
     </div>
 

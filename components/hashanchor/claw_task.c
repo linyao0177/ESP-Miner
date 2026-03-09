@@ -7,6 +7,8 @@
 #include "boat_attest.h"
 #include "boat_pay.h"
 #include "boat_x402.h"
+#include "boat_solana.h"
+#include "boat_lightning.h"
 #include "boat_claw.h"
 #include "boat_pal.h"
 
@@ -153,17 +155,32 @@ void claw_init(boat_keypair_t *kp, GlobalState *state)
 {
     g_claw_kp = kp;
 
+    char *pay_chain = nvs_config_get_string(NVS_CONFIG_CLAW_PAY_CHAIN);
+    const char *chain = (pay_chain && strlen(pay_chain) > 0) ? pay_chain : "arc";
+    ESP_LOGI(TAG, "Payment chain: %s", chain);
+
     if (nvs_config_get_bool(NVS_CONFIG_CLAW_ENABLE_RENTAL)) {
         char *x402_network = nvs_config_get_string(NVS_CONFIG_CLAW_X402_NETWORK);
         char *x402_asset   = nvs_config_get_string(NVS_CONFIG_CLAW_X402_ASSET);
         uint64_t x402_amount = nvs_config_get_u64(NVS_CONFIG_CLAW_X402_AMOUNT);
         if (x402_amount == 0) x402_amount = 100000;
 
+        /* Chain-specific defaults for x402 offer */
+        const char *default_network = "eip155:84532";
+        const char *default_asset = "0x036CbD53842c5426634e7929541eC2318f3dCF7e";
+        if (strcmp(chain, "solana") == 0) {
+            default_network = "solana:devnet";
+            default_asset = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
+        } else if (strcmp(chain, "lightning") == 0) {
+            default_network = "lightning";
+            default_asset = "BTC";
+        }
+
         boat_x402_offer_service_t rental = {
             .path = "/hashrate",
             .description = "Bitaxe 601 hashrate rental (1 TH/s, 1 hour)",
-            .network = x402_network ? x402_network : "eip155:84532",
-            .asset = x402_asset ? x402_asset : "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+            .network = (x402_network && strlen(x402_network) > 0) ? x402_network : default_network,
+            .asset = (x402_asset && strlen(x402_asset) > 0) ? x402_asset : default_asset,
             .amount = x402_amount,
             .validity_seconds = 3600,
             .on_payment_verified = hashrate_rental_callback,
@@ -178,7 +195,15 @@ void claw_init(boat_keypair_t *kp, GlobalState *state)
            they are referenced by the service registry for the device lifetime */
     }
 
-    ESP_LOGI(TAG, "Claw agent initialized");
+    /* Log Solana address if chain is solana */
+    if (strcmp(chain, "solana") == 0) {
+        char sol_addr[64];
+        boat_base58_encode(kp->ed25519_pk, 32, sol_addr, sizeof(sol_addr));
+        ESP_LOGI(TAG, "Solana wallet: %s", sol_addr);
+    }
+
+    free(pay_chain);
+    ESP_LOGI(TAG, "Claw agent initialized (chain: %s)", chain);
 }
 
 /* ================================================================
@@ -323,4 +348,175 @@ int claw_x402_handle_request(const char *path,
     *out_body = NULL;
     *out_len = 0;
     return (err == BOAT_ERR_KEY_NOT_FOUND) ? 404 : 500;
+}
+
+/* ================================================================
+ * Solana: device wallet info + test payment
+ * GET  /api/solana/info   → returns device Solana address
+ * POST /api/solana/pay    → test USDC transfer (devnet)
+ * ================================================================ */
+
+int claw_solana_info(char **out_body, size_t *out_len)
+{
+    if (!g_claw_kp || !out_body || !out_len) return 500;
+
+    /* Derive Solana address (= base58 of Ed25519 public key) */
+    char sol_addr[64];
+    boat_base58_encode(g_claw_kp->ed25519_pk, 32, sol_addr, sizeof(sol_addr));
+
+    /* Derive ATAs for both networks */
+    char ata_mainnet[64], ata_devnet[64];
+    boat_sol_pubkey_t ata;
+
+    boat_sol_derive_ata(g_claw_kp->ed25519_pk, BOAT_SOL_USDC_MINT_MAINNET, ata);
+    boat_base58_encode(ata, 32, ata_mainnet, sizeof(ata_mainnet));
+
+    boat_sol_derive_ata(g_claw_kp->ed25519_pk, BOAT_SOL_USDC_MINT_DEVNET, ata);
+    boat_base58_encode(ata, 32, ata_devnet, sizeof(ata_devnet));
+
+    char *body = (char *)malloc(512);
+    if (!body) return 500;
+    int len = snprintf(body, 512,
+        "{\"solana_address\":\"%s\","
+        "\"eth_address\":\"%s\","
+        "\"ata_mainnet\":\"%s\","
+        "\"ata_devnet\":\"%s\","
+        "\"did\":\"%s\"}",
+        sol_addr, g_claw_kp->eth_addr_hex,
+        ata_mainnet, ata_devnet,
+        g_claw_kp->did);
+
+    *out_body = body;
+    *out_len = (size_t)len;
+    return 200;
+}
+
+int claw_solana_pay(const char *recipient_b58, uint64_t amount,
+                     int devnet, char **out_body, size_t *out_len)
+{
+    if (!g_claw_kp || !recipient_b58 || !out_body || !out_len) return 500;
+
+    /* Decode recipient */
+    boat_sol_payment_t payment;
+    int dec_len = boat_base58_decode(recipient_b58, payment.recipient, 32);
+    if (dec_len != 32) {
+        char *body = strdup("{\"error\":\"invalid recipient address\"}");
+        *out_body = body; *out_len = strlen(body);
+        return 400;
+    }
+    payment.amount = amount;
+    payment.devnet = devnet;
+
+    /* Execute payment */
+    char tx_sig[128] = {0};
+    boat_err_t err = boat_sol_pay_usdc(g_claw_kp, &payment, 1,
+                                        tx_sig, sizeof(tx_sig));
+
+    char *body = (char *)malloc(256);
+    if (!body) return 500;
+
+    if (err == BOAT_OK) {
+        int len = snprintf(body, 256,
+            "{\"status\":\"success\",\"tx_signature\":\"%s\","
+            "\"network\":\"%s\",\"amount\":%" PRIu64 "}",
+            tx_sig, devnet ? "devnet" : "mainnet", amount);
+        *out_body = body; *out_len = (size_t)len;
+        ESP_LOGI(TAG, "Solana payment sent: %s", tx_sig);
+        return 200;
+    } else {
+        int len = snprintf(body, 256,
+            "{\"error\":\"payment failed\",\"code\":%d}", (int)err);
+        *out_body = body; *out_len = (size_t)len;
+        ESP_LOGE(TAG, "Solana payment failed: %d", (int)err);
+        return 500;
+    }
+}
+
+/* ================================================================
+ * Lightning: create invoice + check payment
+ * POST /api/lightning/invoice   → create BOLT11 invoice
+ * GET  /api/lightning/check     → check payment status
+ * ================================================================ */
+
+int claw_lightning_invoice(uint64_t amount_sats, const char *memo,
+                            char **out_body, size_t *out_len)
+{
+    if (!out_body || !out_len) return 500;
+
+    /* Read LNbits config from NVS */
+    char *lnbits_url = nvs_config_get_string(NVS_CONFIG_CLAW_BRIDGE_URL);
+    /* Reuse bridge URL as LNbits proxy, or add dedicated NVS keys */
+
+    if (!lnbits_url || strlen(lnbits_url) == 0) {
+        free(lnbits_url);
+        char *body = strdup("{\"error\":\"LNbits not configured. "
+            "Set claw_bridge_url to your LNbits URL\"}");
+        *out_body = body; *out_len = strlen(body);
+        return 400;
+    }
+
+    /* For now, use bridge as LNbits proxy endpoint */
+    /* The bridge will forward /lightning/invoice to LNbits API */
+    char url[256];
+    snprintf(url, sizeof(url), "%s/lightning/invoice", lnbits_url);
+    free(lnbits_url);
+
+    char req_body[256];
+    snprintf(req_body, sizeof(req_body),
+        "{\"amount\":%" PRIu64 ",\"memo\":\"%s\"}",
+        amount_sats, memo ? memo : "Bitaxe hashrate");
+
+    char response[1024] = {0};
+    int status = 0;
+    boat_err_t err = boat_pal_http_post(url, NULL, "application/json",
+                                         req_body, &status, response,
+                                         sizeof(response));
+
+    if (err == BOAT_OK && (status == 200 || status == 201)) {
+        char *body = strdup(response);
+        *out_body = body; *out_len = strlen(body);
+        ESP_LOGI(TAG, "Lightning invoice created: %" PRIu64 " sats", amount_sats);
+        return 200;
+    } else {
+        char *body = (char *)malloc(256);
+        int len = snprintf(body, 256,
+            "{\"error\":\"invoice creation failed\",\"http_status\":%d}", status);
+        *out_body = body; *out_len = (size_t)len;
+        return 500;
+    }
+}
+
+int claw_lightning_check(const char *payment_hash,
+                          char **out_body, size_t *out_len)
+{
+    if (!payment_hash || !out_body || !out_len) return 500;
+
+    char *lnbits_url = nvs_config_get_string(NVS_CONFIG_CLAW_BRIDGE_URL);
+    if (!lnbits_url || strlen(lnbits_url) == 0) {
+        free(lnbits_url);
+        char *body = strdup("{\"error\":\"LNbits not configured\"}");
+        *out_body = body; *out_len = strlen(body);
+        return 400;
+    }
+
+    char url[320];
+    snprintf(url, sizeof(url), "%s/lightning/check/%s",
+             lnbits_url, payment_hash);
+    free(lnbits_url);
+
+    char response[512] = {0};
+    int status = 0;
+    boat_err_t err = boat_pal_http_post(url, NULL, "application/json",
+                                         "", &status, response,
+                                         sizeof(response));
+
+    if (err == BOAT_OK && status == 200) {
+        char *body = strdup(response);
+        *out_body = body; *out_len = strlen(body);
+        return 200;
+    } else {
+        char *body = strdup("{\"error\":\"check failed\"}");
+        *out_body = body; *out_len = strlen(body);
+        return 500;
+    }
 }

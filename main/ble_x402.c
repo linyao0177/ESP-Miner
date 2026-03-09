@@ -51,10 +51,11 @@ void ble_x402_update_stats(float hashrate, float temp, float power, uint16_t fre
 static int offer_access_cb(uint16_t conn, uint16_t attr,
     struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
+    ESP_LOGI(TAG, "offer_access_cb op=%d", ctxt->op);
     if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
         ble_x402_build_offer();
-        os_mbuf_append(ctxt->om, offer_json, strlen(offer_json));
-        ESP_LOGI(TAG, "Offer read by client");
+        int rc = os_mbuf_append(ctxt->om, offer_json, strlen(offer_json));
+        ESP_LOGI(TAG, "Offer read by client, len=%d rc=%d", (int)strlen(offer_json), rc);
     }
     return 0;
 }
@@ -62,8 +63,10 @@ static int offer_access_cb(uint16_t conn, uint16_t attr,
 static int stats_access_cb(uint16_t conn, uint16_t attr,
     struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
+    ESP_LOGI(TAG, "stats_access_cb op=%d", ctxt->op);
     if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
-        os_mbuf_append(ctxt->om, stats_json, strlen(stats_json));
+        int rc = os_mbuf_append(ctxt->om, stats_json, strlen(stats_json));
+        ESP_LOGI(TAG, "Stats read by client, len=%d rc=%d", (int)strlen(stats_json), rc);
     }
     return 0;
 }
@@ -71,6 +74,7 @@ static int stats_access_cb(uint16_t conn, uint16_t attr,
 static int payment_access_cb(uint16_t conn, uint16_t attr,
     struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
+    ESP_LOGI(TAG, "payment_access_cb op=%d", ctxt->op);
     if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
         uint16_t len = OS_MBUF_PKTLEN(ctxt->om);
         if (payment_len + len < (int)sizeof(payment_buf) - 1) {
@@ -120,7 +124,7 @@ static const struct ble_gatt_svc_def x402_svcs[] = {
             {
                 .uuid = &payment_chr_uuid.u,
                 .access_cb = payment_access_cb,
-                .flags = BLE_GATT_CHR_F_WRITE,
+                .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP,
             },
             {
                 .uuid = &receipt_chr_uuid.u,
@@ -162,6 +166,9 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
             &(struct ble_gap_adv_params){
                 .conn_mode = BLE_GAP_CONN_MODE_UND,
                 .disc_mode = BLE_GAP_DISC_MODE_GEN,
+                .itvl_min = BLE_GAP_ADV_FAST_INTERVAL1_MIN,
+                .itvl_max = BLE_GAP_ADV_FAST_INTERVAL1_MAX,
+                .channel_map = 7,
             }, gap_event_cb, NULL);
         break;
 
@@ -169,7 +176,13 @@ static int gap_event_cb(struct ble_gap_event *event, void *arg) {
         ESP_LOGI(TAG, "MTU updated: %d", event->mtu.value);
         break;
 
+    case BLE_GAP_EVENT_SUBSCRIBE:
+        ESP_LOGI(TAG, "Subscribe event: handle=%d, cur_notify=%d",
+            event->subscribe.attr_handle, event->subscribe.cur_notify);
+        break;
+
     default:
+        ESP_LOGI(TAG, "GAP event: %d", event->type);
         break;
     }
     return 0;
@@ -195,6 +208,9 @@ static void ble_on_sync(void) {
     struct ble_gap_adv_params adv_params = {
         .conn_mode = BLE_GAP_CONN_MODE_UND,
         .disc_mode = BLE_GAP_DISC_MODE_GEN,
+        .itvl_min = BLE_GAP_ADV_FAST_INTERVAL1_MIN,  /* 30ms */
+        .itvl_max = BLE_GAP_ADV_FAST_INTERVAL1_MAX,  /* 60ms */
+        .channel_map = 7,  /* all 3 adv channels */
     };
     ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, BLE_HS_FOREVER,
         &adv_params, gap_event_cb, NULL);

@@ -56,6 +56,12 @@ export class EditComponent implements OnInit, OnDestroy, OnChanges {
 
   public displays = ["NONE", "SSD1306 (128x32)", "SSD1309 (128x64)", "SH1107 (64x128)", "SH1107 (128x128)"];
   public rotations = [0, 90, 180, 270];
+
+  public payChainOptions = [
+    { label: 'ARC (EVM / Polygon)', value: 'arc' },
+    { label: 'Solana (SPL USDC)', value: 'solana' },
+    { label: 'Lightning Network', value: 'lightning' },
+  ];
   public displayTimeoutControl: FormControl;
   public statsFrequencyControl: FormControl;
 
@@ -191,6 +197,10 @@ export class EditComponent implements OnInit, OnDestroy, OnChanges {
           hashanchorApiKey: [info.hashanchorApiKey ?? ''],
           hashanchorDeviceId: [info.hashanchorDeviceId ?? ''],
           hashanchorInterval: [info.hashanchorInterval ?? 300, [Validators.min(60)]],
+          clawPayChain: [info.clawPayChain ?? 'arc'],
+          clawEnabled: [info.clawEnabled ?? false],
+          clawEnableRental: [info.clawEnableRental ?? false],
+          clawBridgeUrl: [info.clawBridgeUrl ?? ''],
         });
 
         // HashAnchor read-only values (not in form, just displayed)

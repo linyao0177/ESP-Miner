@@ -127,7 +127,8 @@ static Settings settings[NVS_CONFIG_COUNT] = {
     [NVS_CONFIG_CLAW_BRIDGE_URL]                      = {.nvs_key_name = "claw_bridge",    .type = TYPE_STR,   .default_value = {.str = ""},                                          .rest_name = "clawBridgeUrl",                      .min = 0,  .max = NVS_STR_LIMIT},
     [NVS_CONFIG_CLAW_X402_NETWORK]                    = {.nvs_key_name = "claw_x402net",   .type = TYPE_STR,   .default_value = {.str = "eip155:84532"},                              .rest_name = "clawX402Network",                    .min = 0,  .max = NVS_STR_LIMIT},
     [NVS_CONFIG_CLAW_X402_ASSET]                      = {.nvs_key_name = "claw_x402ast",   .type = TYPE_STR,   .default_value = {.str = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"},.rest_name = "clawX402Asset",                      .min = 0,  .max = NVS_STR_LIMIT},
-    [NVS_CONFIG_CLAW_X402_AMOUNT]                     = {.nvs_key_name = "claw_x402amt",   .type = TYPE_U64,   .default_value = {.u64 = 100000},                                      .rest_name = "clawX402Amount",                     .min = 0,  .max = 0},
+    [NVS_CONFIG_CLAW_X402_AMOUNT]                     = {.nvs_key_name = "claw_x402amt",   .type = TYPE_U64,   .default_value = {.u64 = 100000},                                      .rest_name = "clawX402Amount",                     .min = 0,  .max = INT32_MAX},
+    [NVS_CONFIG_CLAW_PAY_CHAIN]                      = {.nvs_key_name = "claw_paychain", .type = TYPE_STR,   .default_value = {.str = "arc"},                                        .rest_name = "clawPayChain",                       .min = 0,  .max = NVS_STR_LIMIT},
 };
 
 Settings *nvs_config_get_settings(NvsConfigKey key)

@@ -22,6 +22,7 @@
 #include "asic_reset.h"
 #include "asic_init.h"
 #include "hashanchor.h"
+#include "ble_x402.h"
 
 static GlobalState GLOBAL_STATE;
 
@@ -133,4 +134,7 @@ void app_main(void)
     if (xTaskCreate(hashanchor_task, "hashanchor", 24576, (void *) &GLOBAL_STATE, 3, NULL) != pdPASS) {
         ESP_LOGE(TAG, "Error creating hashanchor task");
     }
+
+    /* Initialize BLE x402 near-field payment service */
+    ble_x402_init(&GLOBAL_STATE);
 }

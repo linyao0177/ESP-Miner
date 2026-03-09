@@ -38,6 +38,7 @@
 #include "nvs.h"
 #include "boat_crypto.h"
 #include "claw_task.h"
+#include "hashanchor.h"
 #include "vcore.h"
 #include "connect.h"
 #include "asic.h"
@@ -971,6 +972,22 @@ static esp_err_t GET_system_info(httpd_req_t * req)
     free(ha_devid);
     free(ha_ethaddr);
 
+    /* Claw / Payment chain settings */
+    char *pay_chain = nvs_config_get_string(NVS_CONFIG_CLAW_PAY_CHAIN);
+    cJSON_AddStringToObject(root, "clawPayChain", pay_chain ? pay_chain : "arc");
+    /* Expose Solana address (derived from Ed25519 pubkey, computed in claw_solana_info) */
+    cJSON_AddStringToObject(root, "hashanchorPayChain", pay_chain ? pay_chain : "arc");
+    cJSON_AddBoolToObject(root, "clawEnabled", nvs_config_get_bool(NVS_CONFIG_CLAW_ENABLED));
+    cJSON_AddBoolToObject(root, "clawEnableRental", nvs_config_get_bool(NVS_CONFIG_CLAW_ENABLE_RENTAL));
+    char *claw_bridge = nvs_config_get_string(NVS_CONFIG_CLAW_BRIDGE_URL);
+    cJSON_AddStringToObject(root, "clawBridgeUrl", claw_bridge ? claw_bridge : "");
+    char *x402_network = nvs_config_get_string(NVS_CONFIG_CLAW_X402_NETWORK);
+    cJSON_AddStringToObject(root, "clawX402Network", x402_network ? x402_network : "eip155:84532");
+    cJSON_AddNumberToObject(root, "clawX402Amount", (double)nvs_config_get_u64(NVS_CONFIG_CLAW_X402_AMOUNT));
+    free(pay_chain);
+    free(claw_bridge);
+    free(x402_network);
+
     cJSON_AddNumberToObject(root, "blockFound", GLOBAL_STATE->SYSTEM_MODULE.block_found);
     cJSON_AddBoolToObject(root, "showNewBlock", GLOBAL_STATE->SYSTEM_MODULE.show_new_block);
 
@@ -1300,6 +1317,33 @@ esp_err_t http_404_error_handler(httpd_req_t * req, httpd_err_code_t err)
     return ESP_OK;
 }
 
+static esp_err_t GET_hashanchor_diag(httpd_req_t *req)
+{
+    httpd_resp_set_type(req, "application/json");
+    if (set_cors_headers(req) != ESP_OK) {
+        httpd_resp_send_500(req);
+        return ESP_OK;
+    }
+
+    const hashanchor_diag_t *d = hashanchor_get_diag();
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "lastErr", d->last_err);
+    cJSON_AddNumberToObject(root, "lastHttpStatus", d->last_http_status);
+    cJSON_AddNumberToObject(root, "lastAttempt", d->last_attempt);
+    cJSON_AddNumberToObject(root, "attemptCount", d->attempt_count);
+    cJSON_AddNumberToObject(root, "successCount", d->success_count);
+    cJSON_AddStringToObject(root, "lastResponse", d->last_response);
+    cJSON_AddNumberToObject(root, "freeHeapInternal", (double)esp_get_free_heap_size());
+    cJSON_AddNumberToObject(root, "minFreeHeapInternal",
+        (double)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
+
+    char *json = cJSON_PrintUnformatted(root);
+    httpd_resp_sendstr(req, json);
+    free(json);
+    cJSON_Delete(root);
+    return ESP_OK;
+}
+
 static esp_err_t GET_hashanchor_exportkey(httpd_req_t * req)
 {
     if (is_network_allowed(req) != ESP_OK) {
@@ -1398,6 +1442,126 @@ static esp_err_t handle_x402_request(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* ---- Solana info endpoint ---- */
+static esp_err_t handle_solana_info(httpd_req_t *req)
+{
+    if (is_network_allowed(req) != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+    }
+    httpd_resp_set_type(req, "application/json");
+    if (set_cors_headers(req) != ESP_OK) { httpd_resp_send_500(req); return ESP_OK; }
+
+    char *body = NULL;
+    size_t body_len = 0;
+    int status = claw_solana_info(&body, &body_len);
+
+    if (status != 200) httpd_resp_set_status(req, "500 Internal Server Error");
+    httpd_resp_send(req, body ? body : "{}", body ? body_len : 2);
+    free(body);
+    return ESP_OK;
+}
+
+/* ---- Solana pay endpoint ---- */
+static esp_err_t handle_solana_pay(httpd_req_t *req)
+{
+    if (is_network_allowed(req) != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+    }
+    httpd_resp_set_type(req, "application/json");
+    if (set_cors_headers(req) != ESP_OK) { httpd_resp_send_500(req); return ESP_OK; }
+
+    /* Read POST body */
+    char buf[256] = {0};
+    int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (ret <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No body");
+        return ESP_OK;
+    }
+
+    cJSON *json = cJSON_Parse(buf);
+    if (!json) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_OK;
+    }
+
+    const char *recipient = cJSON_GetStringValue(cJSON_GetObjectItem(json, "recipient"));
+    uint64_t amount = (uint64_t)cJSON_GetNumberValue(cJSON_GetObjectItem(json, "amount"));
+    int devnet = cJSON_IsTrue(cJSON_GetObjectItem(json, "devnet"));
+
+    char *body = NULL;
+    size_t body_len = 0;
+    int status = claw_solana_pay(recipient, amount, devnet, &body, &body_len);
+    cJSON_Delete(json);
+
+    if (status != 200) httpd_resp_set_status(req, status == 400 ? "400 Bad Request" : "500 Internal Server Error");
+    httpd_resp_send(req, body ? body : "{}", body ? body_len : 2);
+    free(body);
+    return ESP_OK;
+}
+
+/* ---- Lightning invoice endpoint ---- */
+static esp_err_t handle_lightning_invoice(httpd_req_t *req)
+{
+    if (is_network_allowed(req) != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+    }
+    httpd_resp_set_type(req, "application/json");
+    if (set_cors_headers(req) != ESP_OK) { httpd_resp_send_500(req); return ESP_OK; }
+
+    char buf[256] = {0};
+    int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
+    if (ret <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No body");
+        return ESP_OK;
+    }
+
+    cJSON *json = cJSON_Parse(buf);
+    if (!json) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid JSON");
+        return ESP_OK;
+    }
+
+    uint64_t amount = (uint64_t)cJSON_GetNumberValue(cJSON_GetObjectItem(json, "amount"));
+    const char *memo = cJSON_GetStringValue(cJSON_GetObjectItem(json, "memo"));
+
+    char *body = NULL;
+    size_t body_len = 0;
+    int status = claw_lightning_invoice(amount, memo, &body, &body_len);
+    cJSON_Delete(json);
+
+    if (status != 200) httpd_resp_set_status(req, status == 400 ? "400 Bad Request" : "500 Internal Server Error");
+    httpd_resp_send(req, body ? body : "{}", body ? body_len : 2);
+    free(body);
+    return ESP_OK;
+}
+
+/* ---- Lightning check endpoint ---- */
+static esp_err_t handle_lightning_check(httpd_req_t *req)
+{
+    if (is_network_allowed(req) != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_401_UNAUTHORIZED, "Unauthorized");
+    }
+    httpd_resp_set_type(req, "application/json");
+    if (set_cors_headers(req) != ESP_OK) { httpd_resp_send_500(req); return ESP_OK; }
+
+    /* Extract payment hash from URI: /api/lightning/check/<hash> */
+    const char *uri = req->uri;
+    const char *hash = uri + 21; /* skip "/api/lightning/check/" */
+    if (strlen(hash) == 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing payment hash");
+        return ESP_OK;
+    }
+
+    char *body = NULL;
+    size_t body_len = 0;
+    int status = claw_lightning_check(hash, &body, &body_len);
+
+    if (status != 200) httpd_resp_set_status(req, "500 Internal Server Error");
+    httpd_resp_send(req, body ? body : "{}", body ? body_len : 2);
+    free(body);
+    return ESP_OK;
+}
+
 esp_err_t start_rest_server(void * pvParameters)
 {
     GLOBAL_STATE = (GlobalState *) pvParameters;
@@ -1422,7 +1586,7 @@ esp_err_t start_rest_server(void * pvParameters)
     config.uri_match_fn = httpd_uri_match_wildcard;
     config.stack_size = 8192;
     config.max_open_sockets = 20;
-    config.max_uri_handlers = 26;
+    config.max_uri_handlers = 30;
     config.close_fn = websocket_close_fn;
     config.lru_purge_enable = true;
 
@@ -1522,6 +1686,15 @@ esp_err_t start_rest_server(void * pvParameters)
     };
     httpd_register_uri_handler(server, &update_system_settings_uri);
 
+    /* HashAnchor: diagnostic status */
+    httpd_uri_t hashanchor_diag_uri = {
+        .uri = "/api/hashanchor/diag",
+        .method = HTTP_GET,
+        .handler = GET_hashanchor_diag,
+        .user_ctx = NULL
+    };
+    httpd_register_uri_handler(server, &hashanchor_diag_uri);
+
     /* HashAnchor: export secp256k1 private key for Gateway deposit */
     httpd_uri_t hashanchor_exportkey_uri = {
         .uri = "/api/hashanchor/exportkey",
@@ -1546,6 +1719,40 @@ esp_err_t start_rest_server(void * pvParameters)
         .user_ctx = rest_context
     };
     httpd_register_uri_handler(server, &x402_post_uri);
+
+    /* Solana endpoints */
+    httpd_uri_t solana_info_uri = {
+        .uri = "/api/solana/info",
+        .method = HTTP_GET,
+        .handler = handle_solana_info,
+        .user_ctx = NULL
+    };
+    httpd_register_uri_handler(server, &solana_info_uri);
+
+    httpd_uri_t solana_pay_uri = {
+        .uri = "/api/solana/pay",
+        .method = HTTP_POST,
+        .handler = handle_solana_pay,
+        .user_ctx = NULL
+    };
+    httpd_register_uri_handler(server, &solana_pay_uri);
+
+    /* Lightning endpoints */
+    httpd_uri_t lightning_invoice_uri = {
+        .uri = "/api/lightning/invoice",
+        .method = HTTP_POST,
+        .handler = handle_lightning_invoice,
+        .user_ctx = NULL
+    };
+    httpd_register_uri_handler(server, &lightning_invoice_uri);
+
+    httpd_uri_t lightning_check_uri = {
+        .uri = "/api/lightning/check/*",
+        .method = HTTP_GET,
+        .handler = handle_lightning_check,
+        .user_ctx = NULL
+    };
+    httpd_register_uri_handler(server, &lightning_check_uri);
 
     httpd_uri_t update_post_ota_firmware = {
         .uri = "/api/system/OTA", 

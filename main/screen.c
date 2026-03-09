@@ -367,9 +367,28 @@ static lv_obj_t * create_scr_wifi() {
 static lv_obj_t * create_scr_x402_pay(const char * ip_addr) {
     lv_obj_t * scr = lv_obj_create(NULL);
     lv_obj_set_flex_flow(scr, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(scr, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_column(scr, 2, LV_PART_MAIN);
+    lv_obj_set_flex_align(scr, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(scr, 4, LV_PART_MAIN);
 
+    /* Build short QR URL: prefer Bridge /p page, fallback to device IP */
+    char data[128];
+    char *bridge_url = nvs_config_get_string(NVS_CONFIG_CLAW_BRIDGE_URL);
+    if (bridge_url && strlen(bridge_url) > 0) {
+        snprintf(data, sizeof(data), "%s/p", bridge_url);
+    } else {
+        /* Short fallback: just device IP (phone can add :80 path manually) */
+        snprintf(data, sizeof(data), "http://%s/p", ip_addr);
+    }
+    free(bridge_url);
+
+    /* QR code on the left — use full screen height */
+    lv_obj_t * qr = lv_qrcode_create(scr);
+    lv_qrcode_set_size(qr, LV_VER_RES);
+    lv_qrcode_set_dark_color(qr, lv_color_black());
+    lv_qrcode_set_light_color(qr, lv_color_white());
+    lv_qrcode_update(qr, data, strlen(data));
+
+    /* Text on the right */
     lv_obj_t * text_cont = lv_obj_create(scr);
     lv_obj_set_flex_flow(text_cont, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(text_cont, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
@@ -380,27 +399,7 @@ static lv_obj_t * create_scr_x402_pay(const char * ip_addr) {
     lv_label_set_text(label1, "x402 PAY");
 
     x402_pay_label = lv_label_create(text_cont);
-    lv_label_set_text(x402_pay_label, "Scan QR");
-
-    /* Build QR URL: prefer Bridge /p page, fallback to device IP */
-    char data[128];
-    char *bridge_url = nvs_config_get_string(NVS_CONFIG_CLAW_BRIDGE_URL);
-    if (bridge_url && strlen(bridge_url) > 0) {
-        snprintf(data, sizeof(data), "%s/p", bridge_url);
-    } else {
-        snprintf(data, sizeof(data), "http://%s/api/hashrate", ip_addr);
-    }
-    free(bridge_url);
-
-    lv_obj_t *label3 = lv_label_create(text_cont);
-    lv_label_set_text(label3, data);
-
-    lv_obj_t * qr = lv_qrcode_create(scr);
-    lv_qrcode_set_size(qr, 32);
-    lv_qrcode_set_dark_color(qr, lv_color_black());
-    lv_qrcode_set_light_color(qr, lv_color_white());
-
-    lv_qrcode_update(qr, data, strlen(data));
+    lv_label_set_text(x402_pay_label, "Scan to pay");
 
     return scr;
 }
