@@ -28,12 +28,14 @@ static const char *TAG = "ble_buyer";
 #define CHR_STREAM_STATUS    0xEE05  /* Notify: session status */
 #define CHR_DEVICE_INFO      0xEE06  /* Read: seller info + wallet */
 
-/* Polygon USDC */
-static const uint8_t USDC_POLYGON[20] = {
-    0x3c, 0x49, 0x9c, 0x54, 0x2c, 0xEF, 0x5E, 0x38, 0x11, 0xe1,
-    0x19, 0x2c, 0xe7, 0x0d, 0x8c, 0xC0, 0x3d, 0x5c, 0x33, 0x59
+/* Arc Testnet USDC (Circle Gateway) */
+static const uint8_t USDC_ARC[20] = {
+    0x36, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 };
-#define CHAIN_ID 137
+#define CHAIN_ID        5042002
+#define DOMAIN_NAME     "GatewayWalletBatched"
+#define DOMAIN_VERSION  "1"
 
 /* ---- Config ---- */
 #define DEFAULT_THRESHOLD       60   /* $0.000060/slice = ~$0.06/kWh */
@@ -218,19 +220,44 @@ static void sign_and_send_slice(const char *slice_json)
         slice.valid_before = boat_pal_time() + 3600;
     }
 
-    /* Sign EIP-3009 */
-    boat_nano_auth_t auth;
-    boat_err_t err = boat_nano_sign(s_kp, s_seller_addr,
-                                     s_result.price_per_slice,
-                                     CHAIN_ID, USDC_POLYGON,
-                                     slice_json ? &slice : NULL,
-                                     &auth);
+    /* Set EIP-712 domain for Arc Testnet Gateway */
+    boat_pay_set_domain_ext(CHAIN_ID, USDC_ARC, DOMAIN_NAME, DOMAIN_VERSION);
+
+    /* Build payment struct */
+    boat_payment_t pay;
+    memset(&pay, 0, sizeof(pay));
+    memcpy(pay.to, s_seller_addr, 20);
+    /* value: uint256 big-endian */
+    {
+        uint64_t v = s_result.price_per_slice;
+        for (int i = 7; i >= 0; i--) pay.value[31-i] = (uint8_t)(v >> (i*8));
+    }
+    pay.valid_after  = slice.valid_after;
+    pay.valid_before = slice.valid_before;
+    memcpy(pay.nonce, slice.nonce, 32);
+
+    /* Sign EIP-3009 with Gateway domain */
+    uint8_t sig65[65];
+    boat_err_t err = boat_pay_authorize(s_kp, &pay, sig65);
     if (err != BOAT_OK) {
-        ESP_LOGE(TAG, "nano_sign failed: %d", err);
+        ESP_LOGE(TAG, "pay_authorize failed: %d", err);
         snprintf(s_result.error, sizeof(s_result.error), "sign: %d", err);
         s_result.state = BLE_BUYER_ERROR;
         return;
     }
+
+    /* Build boat_nano_auth_t from pay + signature */
+    boat_nano_auth_t auth;
+    memset(&auth, 0, sizeof(auth));
+    memcpy(auth.from, s_kp->eth_address, 20);
+    memcpy(auth.to, pay.to, 20);
+    memcpy(auth.value, pay.value, 32);
+    auth.valid_after  = pay.valid_after;
+    auth.valid_before = pay.valid_before;
+    memcpy(auth.nonce, pay.nonce, 32);
+    memcpy(auth.r, sig65, 32);
+    memcpy(auth.s, sig65 + 32, 32);
+    auth.v = sig65[64];
 
     /* Build JSON */
     char *pay_json = malloc(600);
