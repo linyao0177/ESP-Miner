@@ -10,6 +10,7 @@
 #include "boat_attest.h"
 #include "boat_pay.h"
 #include "boat_solana.h"
+#include "ble_buyer.h"
 
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -23,10 +24,11 @@ static const char *TAG = "ha_task";
 
 /* Diagnostic state (readable via HTTP API) */
 static hashanchor_diag_t s_diag = {0};
+static volatile int s_paused = 0;
 
-const hashanchor_diag_t *hashanchor_get_diag(void) {
-    return &s_diag;
-}
+const hashanchor_diag_t *hashanchor_get_diag(void) { return &s_diag; }
+void hashanchor_set_paused(int paused) { s_paused = paused; }
+int hashanchor_is_paused(void) { return s_paused; }
 
 /* Polygon USDC contract address */
 static const uint8_t USDC_CONTRACT[20] = {
@@ -159,7 +161,7 @@ void hashanchor_task(void *pvParameters)
     nvs_config_set_string(NVS_CONFIG_HASHANCHOR_ETH_ADDRESS, kp.eth_addr_hex);
 
     /* Initialize EIP-712 domain for Polygon USDC (needed for payment mode) */
-    boat_pay_set_domain(137, USDC_CONTRACT);
+    boat_pay_set_domain_ext(137, USDC_CONTRACT, "USD Coin", "2");
 
     /* Cached payment requirements (persists across loop iterations) */
     boat_pay_requirements_t pay_req;
@@ -194,12 +196,16 @@ void hashanchor_task(void *pvParameters)
         free(device_id);
     }
 
+    /* Initialize BLE buyer (central role for eCandle payments) */
+    ble_buyer_init(&kp);
+
     /* Initialize Claw agent (x402 offers, heartbeat config) */
     claw_init(&kp, state);
 
     while (1) {
-        if (!nvs_config_get_bool(NVS_CONFIG_HASHANCHOR_ENABLED)) {
-            vTaskDelay(pdMS_TO_TICKS(30000));
+        if (!nvs_config_get_bool(NVS_CONFIG_HASHANCHOR_ENABLED) || s_paused) {
+            if (s_paused) ESP_LOGI(TAG, "Paused (BLE session active)");
+            vTaskDelay(pdMS_TO_TICKS(5000));
             continue;
         }
 
@@ -301,6 +307,19 @@ void hashanchor_task(void *pvParameters)
         cJSON_Delete(payload);
         free(json_str);
         free(metadata_json);
+
+        /* Check for remote restart command in server response */
+        s_diag.restart_check_count++;
+        strncpy(s_diag.restart_response, pay_req.last_response, sizeof(s_diag.restart_response) - 1);
+        s_diag.restart_response[sizeof(s_diag.restart_response) - 1] = '\0';
+        ESP_LOGI(TAG, "Restart check: err=%d, response=%.80s", (int)err, pay_req.last_response);
+        if (err == BOAT_OK && strstr(pay_req.last_response, "\"restart\":true") != NULL) {
+            s_diag.restart_found = 1;
+            ESP_LOGW(TAG, "Remote restart requested by server, rebooting...");
+            free(pay_chain); free(url); free(api_key); free(device_id);
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            esp_restart();
+        }
 
         /* Run Claw heartbeat (green/credit/telegram) sequentially,
          * sharing the TLS session to avoid mbedtls memory exhaustion. */

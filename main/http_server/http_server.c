@@ -37,6 +37,7 @@
 #include "nvs_config.h"
 #include "nvs.h"
 #include "boat_crypto.h"
+#include "ble_buyer.h"
 #include "claw_task.h"
 #include "hashanchor.h"
 #include "vcore.h"
@@ -1333,6 +1334,9 @@ static esp_err_t GET_hashanchor_diag(httpd_req_t *req)
     cJSON_AddNumberToObject(root, "attemptCount", d->attempt_count);
     cJSON_AddNumberToObject(root, "successCount", d->success_count);
     cJSON_AddStringToObject(root, "lastResponse", d->last_response);
+    cJSON_AddNumberToObject(root, "restartCheckCount", d->restart_check_count);
+    cJSON_AddNumberToObject(root, "restartFound", d->restart_found);
+    cJSON_AddStringToObject(root, "restartResponse", d->restart_response);
     cJSON_AddNumberToObject(root, "freeHeapInternal", (double)esp_get_free_heap_size());
     cJSON_AddNumberToObject(root, "minFreeHeapInternal",
         (double)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
@@ -1391,6 +1395,114 @@ static esp_err_t GET_hashanchor_exportkey(httpd_req_t * req)
     httpd_resp_sendstr(req, json);
     free(json);
     return ESP_OK;
+}
+
+/* ---- BLE buyer endpoints ---- */
+
+static esp_err_t POST_ble_buy_start(httpd_req_t *req)
+{
+#ifdef CONFIG_BT_NIMBLE_ROLE_CENTRAL
+    /* Optional: parse target device name from body */
+    char body[64] = {0};
+    int len = httpd_req_recv(req, body, sizeof(body) - 1);
+    if (len > 0) body[len] = '\0';
+
+    const char *target = NULL;
+    /* Simple parse: {"target":"eCandle"} */
+    char *p = strstr(body, "\"target\":\"");
+    char target_buf[32] = {0};
+    if (p) {
+        p += 10;
+        char *e = strchr(p, '"');
+        if (e && (e - p) < 31) {
+            memcpy(target_buf, p, e - p);
+            target = target_buf;
+        }
+    }
+
+    /* Parse max_slices and slice_seconds */
+    uint32_t max_slices = 24, slice_seconds = 10;
+    char *ms = strstr(body, "\"max_slices\":");
+    if (ms) max_slices = (uint32_t)atoi(ms + 13);
+    char *ss = strstr(body, "\"slice_seconds\":");
+    if (ss) slice_seconds = (uint32_t)atoi(ss + 16);
+
+    esp_err_t err = ble_buyer_start(target, max_slices, slice_seconds);
+    if (err != ESP_OK) {
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_sendstr(req, "{\"error\":\"buy already in progress or not initialized\"}");
+        return ESP_OK;
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"status\":\"scanning\",\"target\":\"");
+    httpd_resp_sendstr(req, target ? target : "ECandle");
+    httpd_resp_sendstr(req, "\"}");
+    return ESP_OK;
+#else
+    httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "BLE central not enabled");
+    return ESP_OK;
+#endif
+}
+
+static esp_err_t GET_ble_buy_status(httpd_req_t *req)
+{
+#ifdef CONFIG_BT_NIMBLE_ROLE_CENTRAL
+    const ble_buyer_result_t *r = ble_buyer_get_result();
+    if (!r) {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"state\":\"not_initialized\"}");
+        return ESP_OK;
+    }
+
+    static const char *state_names[] = {
+        "idle", "scanning", "connecting", "discovering",
+        "reading_info", "negotiating", "streaming",
+        "complete", "error"
+    };
+    const char *state_str = (r->state <= BLE_BUYER_ERROR) ? state_names[r->state] : "unknown";
+
+    char *json = malloc(1024);
+    if (!json) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OOM");
+        return ESP_OK;
+    }
+
+    int n = snprintf(json, 1024,
+        "{\"state\":\"%s\""
+        ",\"slices_paid\":%lu"
+        ",\"max_slices\":%lu"
+        ",\"total_paid\":%llu"
+        ",\"total_wh\":%.4f"
+        ",\"mining\":%s",
+        state_str,
+        (unsigned long)r->slices_paid,
+        (unsigned long)r->max_slices,
+        (unsigned long long)r->total_paid,
+        (double)r->total_wh,
+        r->mining_active ? "true" : "false");
+
+    if (r->seller_name[0])
+        n += snprintf(json + n, 1024 - n, ",\"seller\":\"%s\"", r->seller_name);
+    if (r->seller_addr[0])
+        n += snprintf(json + n, 1024 - n, ",\"payTo\":\"%s\"", r->seller_addr);
+    if (r->price_per_slice)
+        n += snprintf(json + n, 1024 - n, ",\"price_per_slice\":%llu",
+                     (unsigned long long)r->price_per_slice);
+    if (r->error[0])
+        n += snprintf(json + n, 1024 - n, ",\"error\":\"%s\"", r->error);
+
+    snprintf(json + n, 1024 - n, "}");
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, json);
+    free(json);
+    return ESP_OK;
+#else
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"state\":\"disabled\"}");
+    return ESP_OK;
+#endif
 }
 
 /* ---- x402 offer endpoint handler ---- */
@@ -1753,6 +1865,23 @@ esp_err_t start_rest_server(void * pvParameters)
         .user_ctx = NULL
     };
     httpd_register_uri_handler(server, &lightning_check_uri);
+
+    /* BLE buyer: start buy from eCandle seller */
+    httpd_uri_t ble_buy_start_uri = {
+        .uri = "/api/boat/buy",
+        .method = HTTP_POST,
+        .handler = POST_ble_buy_start,
+        .user_ctx = NULL
+    };
+    httpd_register_uri_handler(server, &ble_buy_start_uri);
+
+    httpd_uri_t ble_buy_status_uri = {
+        .uri = "/api/boat/buy",
+        .method = HTTP_GET,
+        .handler = GET_ble_buy_status,
+        .user_ctx = NULL
+    };
+    httpd_register_uri_handler(server, &ble_buy_status_uri);
 
     httpd_uri_t update_post_ota_firmware = {
         .uri = "/api/system/OTA", 

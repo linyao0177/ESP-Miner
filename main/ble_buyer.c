@@ -1,0 +1,841 @@
+#include "ble_buyer.h"
+
+#ifdef CONFIG_BT_NIMBLE_ROLE_CENTRAL
+
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <inttypes.h>
+#include "esp_log.h"
+#include "host/ble_hs.h"
+#include "host/ble_uuid.h"
+#include "host/ble_gap.h"
+#include "host/ble_gatt.h"
+#include "boat_crypto.h"
+#include "boat_nano.h"
+#include "boat_pay.h"
+#include "boat_pal.h"
+#include "hashanchor.h"
+
+static const char *TAG = "ble_buyer";
+
+/* ---- eCandle GATT UUIDs (0xEE00 service) ---- */
+#define ECANDLE_SVC          0xEE00
+#define CHR_STREAM_REQUEST   0xEE01  /* Write: initiate purchase */
+#define CHR_STREAM_OFFER     0xEE02  /* Notify: seller price offer */
+#define CHR_SLICE_REQUEST    0xEE03  /* Notify: per-slice payment request */
+#define CHR_SLICE_PAYMENT    0xEE04  /* Write: signed EIP-3009 */
+#define CHR_STREAM_STATUS    0xEE05  /* Notify: session status */
+#define CHR_DEVICE_INFO      0xEE06  /* Read: seller info + wallet */
+
+/* Polygon USDC */
+static const uint8_t USDC_POLYGON[20] = {
+    0x3c, 0x49, 0x9c, 0x54, 0x2c, 0xEF, 0x5E, 0x38, 0x11, 0xe1,
+    0x19, 0x2c, 0xe7, 0x0d, 0x8c, 0xC0, 0x3d, 0x5c, 0x33, 0x59
+};
+#define CHAIN_ID 137
+
+/* ---- State ---- */
+static const boat_keypair_t *s_kp = NULL;
+static ble_buyer_result_t s_result;
+static uint16_t s_conn = BLE_HS_CONN_HANDLE_NONE;
+static char s_target_name[32] = {0};
+static int s_target_found = 0;
+static uint32_t s_max_slices = 24;
+static uint32_t s_slice_seconds = 10;
+
+/* Discovered characteristic value handles */
+static uint16_t h_stream_request = 0;
+static uint16_t h_stream_offer = 0;
+static uint16_t h_slice_request = 0;
+static uint16_t h_slice_payment = 0;
+static uint16_t h_stream_status = 0;
+static uint16_t h_device_info = 0;
+
+/* CCCD descriptor handles (discovered dynamically) */
+static uint16_t h_cccd_offer = 0;
+static uint16_t h_cccd_slice_req = 0;
+static uint16_t h_cccd_status = 0;
+
+/* Service handle range for descriptor discovery */
+static uint16_t s_svc_end_handle = 0;
+
+/* Seller address in binary */
+static uint8_t s_seller_addr[20] = {0};
+
+/* ---- JSON helpers ---- */
+
+static int jget(const char *json, const char *key, char *out, size_t max)
+{
+    char pat[48];
+    snprintf(pat, sizeof(pat), "\"%s\":\"", key);
+    const char *p = strstr(json, pat);
+    if (p) {
+        p += strlen(pat);
+        const char *e = strchr(p, '"');
+        if (!e) return -1;
+        size_t len = (size_t)(e - p) < max - 1 ? (size_t)(e - p) : max - 1;
+        memcpy(out, p, len);
+        out[len] = '\0';
+        return 0;
+    }
+    /* Try numeric */
+    snprintf(pat, sizeof(pat), "\"%s\":", key);
+    p = strstr(json, pat);
+    if (!p) return -1;
+    p += strlen(pat);
+    while (*p == ' ') p++;
+    size_t i = 0;
+    while (*p && *p != ',' && *p != '}' && i < max - 1)
+        out[i++] = *p++;
+    out[i] = '\0';
+    return 0;
+}
+
+static uint64_t jget_u64(const char *json, const char *key)
+{
+    char buf[32] = {0};
+    if (jget(json, key, buf, sizeof(buf)) < 0) return 0;
+    uint64_t v = 0;
+    /* Handle both "42" (string) and 42 (number), also "0.000042" */
+    const char *p = buf;
+    if (*p == '"') p++;
+    /* Check for decimal format like "0.000042" */
+    const char *dot = strchr(p, '.');
+    if (dot) {
+        /* Parse as float * 10^6 (USDC 6 decimals) */
+        double fv = strtod(p, NULL);
+        v = (uint64_t)(fv * 1000000.0 + 0.5);
+    } else {
+        while (*p >= '0' && *p <= '9') { v = v * 10 + (*p - '0'); p++; }
+    }
+    return v;
+}
+
+/* ---- Build auth JSON for SlicePayment ---- */
+
+static int auth_to_json(const boat_nano_auth_t *a, char *out, size_t max)
+{
+    char from_h[43], to_h[43], nonce_h[67], r_h[67], s_h[67];
+    snprintf(from_h, 43, "0x"); boat_bytes_to_hex(a->from, 20, from_h + 2);
+    snprintf(to_h, 43, "0x");   boat_bytes_to_hex(a->to, 20, to_h + 2);
+    snprintf(nonce_h, 67, "0x"); boat_bytes_to_hex(a->nonce, 32, nonce_h + 2);
+    snprintf(r_h, 67, "0x");    boat_bytes_to_hex(a->r, 32, r_h + 2);
+    snprintf(s_h, 67, "0x");    boat_bytes_to_hex(a->s, 32, s_h + 2);
+
+    /* Convert value from uint256 big-endian to decimal string */
+    uint64_t val_dec = 0;
+    for (int i = 24; i < 32; i++) /* lower 8 bytes sufficient for USDC amounts */
+        val_dec = (val_dec << 8) | a->value[i];
+    char val_str[21];
+    snprintf(val_str, sizeof(val_str), "%" PRIu64, val_dec);
+
+    return snprintf(out, max,
+        "{\"from\":\"%s\",\"to\":\"%s\",\"value\":\"%s\","
+        "\"valid_after\":%" PRIu32 ",\"valid_before\":%" PRIu32 ","
+        "\"nonce\":\"%s\",\"v\":%u,\"r\":\"%s\",\"s\":\"%s\"}",
+        from_h, to_h, val_str,
+        a->valid_after, a->valid_before,
+        nonce_h, (unsigned)a->v, r_h, s_h);
+}
+
+/* ---- Forward declarations ---- */
+static int gap_event(struct ble_gap_event *event, void *arg);
+static void sign_and_send_slice(const char *slice_json);
+static void start_mining(void);
+static void stop_mining(void);
+static int on_info_read(uint16_t conn, const struct ble_gatt_error *error,
+                         struct ble_gatt_attr *attr, void *arg);
+static int on_verify_debug_read(uint16_t conn, const struct ble_gatt_error *error,
+                                 struct ble_gatt_attr *attr, void *arg);
+static void send_stream_request(void);
+
+/* ---- BM1370 control via localhost HTTP ---- */
+
+static void start_mining(void)
+{
+    if (s_result.mining_active) return;
+    s_result.mining_active = 1;
+    ESP_LOGI(TAG, "BM1370: START mining");
+    /* Mining is already running on Bitaxe normally — just flag it */
+}
+
+static void stop_mining(void)
+{
+    if (!s_result.mining_active) return;
+    s_result.mining_active = 0;
+    ESP_LOGI(TAG, "BM1370: STOP mining (energy session ended)");
+}
+
+/* Resume hashanchor when BLE session ends (any reason) */
+static void session_ended(void)
+{
+    hashanchor_set_paused(0);
+    ESP_LOGI(TAG, "Hashanchor resumed");
+}
+
+/* ---- Sign a slice payment and write to eCandle ---- */
+
+static void sign_and_send_slice(const char *slice_json)
+{
+    if (!s_kp || s_conn == BLE_HS_CONN_HANDLE_NONE || !h_slice_payment) {
+        ESP_LOGE(TAG, "Cannot send slice: not connected");
+        return;
+    }
+
+    /* Parse slice request for nonce/timing */
+    boat_nano_slice_t slice = {0};
+    char nonce_str[67] = {0};
+
+    if (slice_json) {
+        char buf[20] = {0};
+        jget(slice_json, "slice_id", buf, sizeof(buf));
+        slice.slice_id = (uint32_t)atoi(buf);
+
+        jget(slice_json, "nonce", nonce_str, sizeof(nonce_str));
+        if (nonce_str[0]) boat_hex_to_bytes(nonce_str, slice.nonce, 32);
+        else boat_pal_random(slice.nonce, 32);
+
+        buf[0] = 0;
+        jget(slice_json, "valid_after", buf, sizeof(buf));
+        slice.valid_after = (uint32_t)atoi(buf);
+
+        buf[0] = 0;
+        jget(slice_json, "valid_before", buf, sizeof(buf));
+        slice.valid_before = (uint32_t)atoi(buf);
+    } else {
+        /* First slice: no slice_request yet */
+        boat_pal_random(slice.nonce, 32);
+        slice.valid_after = 0;
+        slice.valid_before = boat_pal_time() + 3600;
+    }
+
+    /* Sign EIP-3009 */
+    boat_nano_auth_t auth;
+    boat_err_t err = boat_nano_sign(s_kp, s_seller_addr,
+                                     s_result.price_per_slice,
+                                     CHAIN_ID, USDC_POLYGON,
+                                     slice_json ? &slice : NULL,
+                                     &auth);
+    if (err != BOAT_OK) {
+        ESP_LOGE(TAG, "nano_sign failed: %d", err);
+        snprintf(s_result.error, sizeof(s_result.error), "sign: %d", err);
+        s_result.state = BLE_BUYER_ERROR;
+        return;
+    }
+
+    /* Build JSON */
+    char *pay_json = malloc(600);
+    if (!pay_json) { s_result.state = BLE_BUYER_ERROR; return; }
+    int len = auth_to_json(&auth, pay_json, 600);
+
+    ESP_LOGI(TAG, "Slice #%" PRIu32 " signed (v=%d), writing %d bytes...",
+             s_result.slices_paid + 1, auth.v, len);
+
+    /* Write to SlicePayment characteristic */
+    int rc = ble_gattc_write_flat(s_conn, h_slice_payment,
+                                   pay_json, (uint16_t)len,
+                                   NULL, NULL);
+    free(pay_json);
+
+    if (rc != 0) {
+        ESP_LOGE(TAG, "BLE write failed: %d", rc);
+        snprintf(s_result.error, sizeof(s_result.error), "write: %d", rc);
+        s_result.state = BLE_BUYER_ERROR;
+        return;
+    }
+
+    s_result.slices_paid++;
+    s_result.total_paid += s_result.price_per_slice;
+    ESP_LOGI(TAG, "Slice #%" PRIu32 "/%" PRIu32 " paid, total=%" PRIu64,
+             s_result.slices_paid, s_result.max_slices, s_result.total_paid);
+
+    /* Read DeviceInfo after payment to get verify debug (last_verify field) */
+    if (h_device_info && s_conn != BLE_HS_CONN_HANDLE_NONE) {
+        ble_gattc_read(s_conn, h_device_info, on_verify_debug_read, NULL);
+    }
+}
+
+static int on_verify_debug_read(uint16_t conn, const struct ble_gatt_error *error,
+                                 struct ble_gatt_attr *attr, void *arg)
+{
+    if (error->status == 0 && attr) {
+        uint16_t len = OS_MBUF_PKTLEN(attr->om);
+        char *json = malloc(len + 1);
+        if (json) {
+            ble_hs_mbuf_to_flat(attr->om, json, len, NULL);
+            json[len] = '\0';
+            ESP_LOGW(TAG, "=== VERIFY DEBUG: %s ===", json);
+
+            /* Store in error field so HTTP API can show it */
+            char last_verify[128] = {0};
+            jget(json, "last_verify", last_verify, sizeof(last_verify));
+            if (last_verify[0]) {
+                snprintf(s_result.error, sizeof(s_result.error), "verify_dbg: %.100s", last_verify);
+            }
+            free(json);
+        }
+    }
+    return 0;
+}
+
+/* ---- Descriptor discovery (find CCCD handles) ---- */
+
+static int on_dsc_disc(uint16_t conn, const struct ble_gatt_error *error,
+                        uint16_t chr_val_handle, const struct ble_gatt_dsc *dsc, void *arg)
+{
+    if (error->status == 0 && dsc) {
+        uint16_t uuid = ble_uuid_u16(&dsc->uuid.u);
+        if (uuid == 0x2902) { /* Client Characteristic Configuration Descriptor */
+            ESP_LOGI(TAG, "  CCCD found: handle=%d for chr_val=%d", dsc->handle, chr_val_handle);
+            if (chr_val_handle == h_stream_offer) h_cccd_offer = dsc->handle;
+            else if (chr_val_handle == h_slice_request) h_cccd_slice_req = dsc->handle;
+            else if (chr_val_handle == h_stream_status) h_cccd_status = dsc->handle;
+        }
+    } else if (error->status == BLE_HS_EDONE) {
+        /* If descriptor discovery didn't find CCCDs, fallback to val_handle+1 */
+        if (!h_cccd_offer && h_stream_offer) h_cccd_offer = h_stream_offer + 1;
+        if (!h_cccd_slice_req && h_slice_request) h_cccd_slice_req = h_slice_request + 1;
+        if (!h_cccd_status && h_stream_status) h_cccd_status = h_stream_status + 1;
+
+        ESP_LOGI(TAG, "CCCD handles: offer=%d sliceReq=%d status=%d",
+                 h_cccd_offer, h_cccd_slice_req, h_cccd_status);
+
+        /* Now read DeviceInfo → subscribe → StreamRequest */
+        s_result.state = BLE_BUYER_READING_INFO;
+        if (h_device_info) {
+            ble_gattc_read(s_conn, h_device_info, on_info_read, NULL);
+        } else {
+            send_stream_request();
+        }
+    }
+    return 0;
+}
+
+/* ---- Characteristic discovery ---- */
+
+static int on_chr_disc(uint16_t conn, const struct ble_gatt_error *error,
+                        const struct ble_gatt_chr *chr, void *arg)
+{
+    if (error->status == 0 && chr) {
+        uint16_t uuid = ble_uuid_u16(&chr->uuid.u);
+        ESP_LOGI(TAG, "  chr 0x%04X def=%d val=%d", uuid, chr->def_handle, chr->val_handle);
+        switch (uuid) {
+            case CHR_STREAM_REQUEST: h_stream_request = chr->val_handle; break;
+            case CHR_STREAM_OFFER:   h_stream_offer = chr->val_handle; break;
+            case CHR_SLICE_REQUEST:  h_slice_request = chr->val_handle; break;
+            case CHR_SLICE_PAYMENT:  h_slice_payment = chr->val_handle; break;
+            case CHR_STREAM_STATUS:  h_stream_status = chr->val_handle; break;
+            case CHR_DEVICE_INFO:    h_device_info = chr->val_handle; break;
+        }
+    } else if (error->status == BLE_HS_EDONE) {
+        ESP_LOGI(TAG, "Chr discovery done: req=%d offer=%d sliceReq=%d pay=%d status=%d info=%d",
+                 h_stream_request, h_stream_offer, h_slice_request,
+                 h_slice_payment, h_stream_status, h_device_info);
+
+        if (!h_slice_payment || !h_stream_request) {
+            snprintf(s_result.error, sizeof(s_result.error), "missing chr");
+            s_result.state = BLE_BUYER_ERROR;
+            ble_gap_terminate(s_conn, BLE_ERR_REM_USER_CONN_TERM);
+            return 0;
+        }
+
+        /* Discover descriptors to find CCCD handles */
+        uint16_t start = h_stream_offer ? h_stream_offer : 1;
+        ble_gattc_disc_all_dscs(s_conn, start, s_svc_end_handle,
+                                 on_dsc_disc, NULL);
+    }
+    return 0;
+}
+
+/* ---- Service discovery ---- */
+
+static int on_svc_disc(uint16_t conn, const struct ble_gatt_error *error,
+                        const struct ble_gatt_svc *svc, void *arg)
+{
+    if (error->status == 0 && svc) {
+        ESP_LOGI(TAG, "Found 0xEE00 service: %d-%d",
+                 svc->start_handle, svc->end_handle);
+        s_svc_end_handle = svc->end_handle;
+        ble_gattc_disc_all_chrs(conn, svc->start_handle, svc->end_handle,
+                                 on_chr_disc, NULL);
+    } else if (error->status == BLE_HS_EDONE) {
+        if (!h_stream_request) {
+            ESP_LOGW(TAG, "0xEE00 service not found");
+            snprintf(s_result.error, sizeof(s_result.error), "no 0xEE00");
+            s_result.state = BLE_BUYER_ERROR;
+            ble_gap_terminate(s_conn, BLE_ERR_REM_USER_CONN_TERM);
+        }
+    }
+    return 0;
+}
+
+/* ---- Send StreamRequest ---- */
+
+static int s_cccd_pending = 0;
+static void do_write_stream_request(void); /* forward decl */
+
+static int on_cccd_written(uint16_t conn, const struct ble_gatt_error *error,
+                            struct ble_gatt_attr *attr, void *arg)
+{
+    if (error->status == 0) {
+        ESP_LOGI(TAG, "CCCD subscribed OK (handle=%d)", attr ? attr->handle : 0);
+    } else {
+        ESP_LOGW(TAG, "CCCD write failed: status=%d", error->status);
+    }
+    /* Chain next CCCD write, then finally StreamRequest */
+    int tag = (int)(uintptr_t)arg;
+    uint8_t next_cccd[2] = {0x01, 0x00};
+    if (tag == 1 && h_slice_request) {
+        uint16_t h = h_cccd_slice_req ? h_cccd_slice_req : h_slice_request + 1;
+        ESP_LOGI(TAG, "Subscribe sliceReq CCCD at handle %d", h);
+        ble_gattc_write_flat(s_conn, h, next_cccd, 2,
+                              on_cccd_written, (void *)(uintptr_t)2);
+    } else if (tag <= 2 && h_stream_status) {
+        uint16_t h = h_cccd_status ? h_cccd_status : h_stream_status + 1;
+        ESP_LOGI(TAG, "Subscribe status CCCD at handle %d", h);
+        ble_gattc_write_flat(s_conn, h, next_cccd, 2,
+                              on_cccd_written, (void *)(uintptr_t)3);
+    } else {
+        /* All CCCDs done — now safe to write StreamRequest */
+        do_write_stream_request();
+    }
+    return 0;
+}
+
+static void subscribe_notifications(void)
+{
+    uint8_t cccd[2] = {0x01, 0x00};
+    /* Chain CCCD writes one at a time to avoid BLE_HS_EBUSY */
+    uint16_t cccd_h = h_cccd_offer ? h_cccd_offer : (h_stream_offer ? h_stream_offer + 1 : 0);
+    if (cccd_h) {
+        ESP_LOGI(TAG, "Subscribe offer CCCD at handle %d", cccd_h);
+        ble_gattc_write_flat(s_conn, cccd_h, cccd, 2, on_cccd_written,
+                              (void *)(uintptr_t)1);
+    } else {
+        /* No offer to subscribe, try slice_request */
+        uint16_t sr_h = h_cccd_slice_req ? h_cccd_slice_req : (h_slice_request ? h_slice_request + 1 : 0);
+        if (sr_h) {
+            ESP_LOGI(TAG, "Subscribe sliceReq CCCD at handle %d", sr_h);
+            ble_gattc_write_flat(s_conn, sr_h, cccd, 2, on_cccd_written,
+                                  (void *)(uintptr_t)2);
+        } else {
+            /* Nothing to subscribe */
+            do_write_stream_request();
+        }
+    }
+}
+
+static void send_stream_request(void)
+{
+    if (!h_stream_request) return;
+
+    /* Subscribe to notifications — StreamRequest will be sent from CCCD callback */
+    s_cccd_pending = 0;
+    subscribe_notifications();
+    if (s_cccd_pending == 0) {
+        /* No notifications to subscribe — send immediately */
+        do_write_stream_request();
+    }
+}
+
+static int on_fallback_info_read(uint16_t conn, const struct ble_gatt_error *error,
+                                  struct ble_gatt_attr *attr, void *arg);
+
+static int on_stream_req_written(uint16_t conn, const struct ble_gatt_error *error,
+                                  struct ble_gatt_attr *attr, void *arg)
+{
+    if (error->status == 0) {
+        ESP_LOGI(TAG, "StreamRequest written OK, waiting for StreamOffer...");
+        /*
+         * Workaround: if CCCD subscription failed silently, we won't get the
+         * StreamOffer notify. After 2 seconds, fallback to reading DeviceInfo
+         * to check if eCandle entered NEGOTIATING and proceed with known price.
+         */
+        /* Use a timer or just read DeviceInfo after a short delay.
+         * Since we can't do async timers easily here, we'll poll DeviceInfo
+         * immediately — by the time the write response arrives, eCandle
+         * should already be in NEGOTIATING state. */
+        if (h_device_info) {
+            ble_gattc_read(conn, h_device_info, on_fallback_info_read, NULL);
+        }
+    } else {
+        ESP_LOGW(TAG, "StreamRequest write error: %d (trying fallback)", error->status);
+        /* Write may have timed out but eCandle might still have processed it.
+         * Try fallback: read DeviceInfo to check state */
+        if (h_device_info && s_conn != BLE_HS_CONN_HANDLE_NONE) {
+            ble_gattc_read(conn, h_device_info, on_fallback_info_read, NULL);
+        } else {
+            snprintf(s_result.error, sizeof(s_result.error), "stream_req_cb: %d", error->status);
+            s_result.state = BLE_BUYER_ERROR;
+        }
+    }
+    return 0;
+}
+
+/* Fallback: if StreamOffer notify not received, read DeviceInfo to check state */
+static int on_fallback_info_read(uint16_t conn, const struct ble_gatt_error *error,
+                                  struct ble_gatt_attr *attr, void *arg)
+{
+    if (s_result.state != BLE_BUYER_NEGOTIATING) {
+        /* StreamOffer already arrived via notify — no need for fallback */
+        return 0;
+    }
+
+    if (error->status == 0 && attr) {
+        char json[256] = {0};
+        uint16_t len = OS_MBUF_PKTLEN(attr->om);
+        if (len < sizeof(json) - 1) {
+            ble_hs_mbuf_to_flat(attr->om, json, len, NULL);
+            ESP_LOGI(TAG, "Fallback DeviceInfo: %s", json);
+
+            char state_str[20] = {0};
+            jget(json, "state", state_str, sizeof(state_str));
+
+            if (strcmp(state_str, "NEGOTIATING") == 0 ||
+                strcmp(state_str, "IDLE") == 0) {
+                /* eCandle processed StreamRequest — use known price as fallback */
+                ESP_LOGW(TAG, "StreamOffer notify not received, using fallback price");
+
+                if (s_result.price_per_slice == 0)
+                    s_result.price_per_slice = 42; /* $0.000042 USDC */
+
+                s_result.state = BLE_BUYER_STREAMING;
+                sign_and_send_slice(NULL);
+                start_mining();
+            }
+        }
+    }
+    return 0;
+}
+
+static void do_write_stream_request(void)
+{
+    char req[256];
+    int len = snprintf(req, sizeof(req),
+        "{\"action\":\"stream_request\","
+        "\"slice_seconds\":%" PRIu32 ","
+        "\"max_slices\":%" PRIu32 ","
+        "\"payer\":\"%s\"}",
+        s_slice_seconds, s_max_slices, s_kp->eth_addr_hex);
+
+    s_result.state = BLE_BUYER_NEGOTIATING;
+    ESP_LOGI(TAG, "StreamRequest (%d bytes): %s", len, req);
+
+    int rc = ble_gattc_write_flat(s_conn, h_stream_request,
+                                   req, (uint16_t)len,
+                                   on_stream_req_written, NULL);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "StreamRequest write failed: %d", rc);
+        snprintf(s_result.error, sizeof(s_result.error), "stream_req: %d", rc);
+        s_result.state = BLE_BUYER_ERROR;
+    }
+}
+
+/* ---- Handle notifications from eCandle ---- */
+
+static void handle_notify(uint16_t attr_handle, const uint8_t *data, uint16_t len)
+{
+    char json[512] = {0};
+    if (len >= sizeof(json)) len = sizeof(json) - 1;
+    memcpy(json, data, len);
+
+    if (attr_handle == h_stream_offer) {
+        /* StreamOffer: parse price and confirm */
+        ESP_LOGI(TAG, "StreamOffer: %s", json);
+
+        s_result.price_per_slice = jget_u64(json, "price_per_slice");
+        if (s_result.price_per_slice == 0) {
+            /* Fallback: try "amount" field */
+            s_result.price_per_slice = jget_u64(json, "amount");
+        }
+
+        char pay_to[43] = {0};
+        jget(json, "payTo", pay_to, sizeof(pay_to));
+        if (pay_to[0]) {
+            strncpy(s_result.seller_addr, pay_to, sizeof(s_result.seller_addr) - 1);
+            boat_hex_to_bytes(pay_to, s_seller_addr, 20);
+        }
+
+        ESP_LOGI(TAG, "Price: %" PRIu64 " USDC/slice, payTo: %s",
+                 s_result.price_per_slice, s_result.seller_addr);
+
+        /* Send first SlicePayment immediately */
+        s_result.state = BLE_BUYER_STREAMING;
+        sign_and_send_slice(NULL);
+        start_mining();
+
+    } else if (attr_handle == h_slice_request) {
+        /* SliceRequest: sign and pay within 3 seconds */
+        ESP_LOGI(TAG, "SliceRequest: %s", json);
+
+        if (s_result.state != BLE_BUYER_STREAMING) {
+            ESP_LOGW(TAG, "SliceRequest while not streaming, ignoring");
+            return;
+        }
+
+        if (s_result.slices_paid >= s_result.max_slices) {
+            ESP_LOGI(TAG, "Max slices reached, not paying");
+            return;
+        }
+
+        sign_and_send_slice(json);
+
+    } else if (attr_handle == h_stream_status) {
+        /* StreamStatus: sync mining state */
+        ESP_LOGI(TAG, "StreamStatus: %s", json);
+
+        char status[20] = {0};
+        jget(json, "status", status, sizeof(status));
+
+        char wh_str[16] = {0};
+        jget(json, "total_wh", wh_str, sizeof(wh_str));
+        if (wh_str[0]) s_result.total_wh = strtof(wh_str, NULL);
+
+        if (strcmp(status, "STREAMING") == 0) {
+            start_mining();
+        } else if (strcmp(status, "COMPLETE") == 0) {
+            ESP_LOGI(TAG, "Session COMPLETE: %" PRIu32 " slices, %.4f Wh, %" PRIu64 " USDC",
+                     s_result.slices_paid, s_result.total_wh, s_result.total_paid);
+            stop_mining();
+            s_result.state = BLE_BUYER_COMPLETE;
+            session_ended();
+        } else if (strcmp(status, "ERROR") == 0) {
+            ESP_LOGW(TAG, "Session ERROR from seller");
+            stop_mining();
+            snprintf(s_result.error, sizeof(s_result.error), "seller error");
+            s_result.state = BLE_BUYER_ERROR;
+        }
+    }
+}
+
+/* ---- GAP event handler ---- */
+
+static int gap_event(struct ble_gap_event *event, void *arg)
+{
+    switch (event->type) {
+    case BLE_GAP_EVENT_DISC: {
+        struct ble_hs_adv_fields fields;
+        if (ble_hs_adv_parse_fields(&fields, event->disc.data,
+                                     event->disc.length_data) != 0)
+            break;
+        if (!fields.name || fields.name_len == 0) break;
+
+        char name[32] = {0};
+        size_t nlen = fields.name_len < 31 ? fields.name_len : 31;
+        memcpy(name, fields.name, nlen);
+
+        int match = 0;
+        if (s_target_name[0])
+            match = (strstr(name, s_target_name) != NULL);
+        else
+            match = (strstr(name, "ECandle") || strstr(name, "eCandle") ||
+                     strstr(name, "ecandle"));
+
+        if (match && !s_target_found) {
+            s_target_found = 1;
+            strncpy(s_result.seller_name, name, sizeof(s_result.seller_name) - 1);
+            ESP_LOGI(TAG, "Found: %s", name);
+            ble_gap_disc_cancel();
+
+            s_result.state = BLE_BUYER_CONNECTING;
+            int rc = ble_gap_connect(BLE_OWN_ADDR_PUBLIC, &event->disc.addr,
+                                      10000, NULL, gap_event, NULL);
+            if (rc != 0) {
+                snprintf(s_result.error, sizeof(s_result.error), "connect: %d", rc);
+                s_result.state = BLE_BUYER_ERROR;
+            }
+        }
+        break;
+    }
+
+    case BLE_GAP_EVENT_DISC_COMPLETE:
+        if (!s_target_found) {
+            ESP_LOGW(TAG, "Scan done, no ECandle found");
+            snprintf(s_result.error, sizeof(s_result.error), "no ECandle found");
+            s_result.state = BLE_BUYER_ERROR;
+            session_ended();
+        }
+        break;
+
+    case BLE_GAP_EVENT_CONNECT:
+        if (event->connect.status == 0) {
+            s_conn = event->connect.conn_handle;
+            ESP_LOGI(TAG, "Connected (handle=%d)", s_conn);
+
+            /* MTU 256: saves ~500 bytes SRAM vs 517, payment JSON ~480 bytes
+             * will be sent in 2 chunks if MTU < 480, which is fine */
+            ble_att_set_preferred_mtu(256);
+            ble_gattc_exchange_mtu(s_conn, NULL, NULL);
+
+            s_result.state = BLE_BUYER_DISCOVERING;
+            h_stream_request = h_stream_offer = h_slice_request = 0;
+            h_slice_payment = h_stream_status = h_device_info = 0;
+
+            ble_uuid16_t svc = BLE_UUID16_INIT(ECANDLE_SVC);
+            ble_gattc_disc_svc_by_uuid(s_conn, &svc.u, on_svc_disc, NULL);
+        } else {
+            snprintf(s_result.error, sizeof(s_result.error),
+                     "conn: %d", event->connect.status);
+            s_result.state = BLE_BUYER_ERROR;
+        }
+        break;
+
+    case BLE_GAP_EVENT_DISCONNECT:
+        ESP_LOGI(TAG, "Disconnected (reason=%d)", event->disconnect.reason);
+        s_conn = BLE_HS_CONN_HANDLE_NONE;
+        stop_mining();
+
+        if (s_result.state == BLE_BUYER_STREAMING ||
+            s_result.state == BLE_BUYER_NEGOTIATING) {
+            /* Unexpected disconnect during session — auto reconnect */
+            ESP_LOGW(TAG, "Session interrupted, reconnecting...");
+            s_target_found = 0;
+            s_result.state = BLE_BUYER_SCANNING;
+            struct ble_gap_disc_params params = { .filter_duplicates = 1, .passive = 1 };
+            ble_gap_disc(BLE_OWN_ADDR_PUBLIC, 15000, &params, gap_event, NULL);
+        } else if (s_result.state != BLE_BUYER_COMPLETE &&
+                   s_result.state != BLE_BUYER_ERROR) {
+            s_result.state = BLE_BUYER_COMPLETE;
+            session_ended();
+        }
+        break;
+
+    case BLE_GAP_EVENT_MTU:
+        ESP_LOGI(TAG, "MTU: %d", event->mtu.value);
+        break;
+
+    case BLE_GAP_EVENT_NOTIFY_RX: {
+        uint16_t len = OS_MBUF_PKTLEN(event->notify_rx.om);
+        uint8_t *buf = malloc(len + 1);
+        if (buf) {
+            ble_hs_mbuf_to_flat(event->notify_rx.om, buf, len, NULL);
+            buf[len] = '\0';
+            handle_notify(event->notify_rx.attr_handle, buf, len);
+            free(buf);
+        }
+        break;
+    }
+
+    default:
+        break;
+    }
+    return 0;
+}
+
+/* ---- DeviceInfo read callback ---- */
+
+static int on_info_read(uint16_t conn, const struct ble_gatt_error *error,
+                         struct ble_gatt_attr *attr, void *arg)
+{
+    if (error->status == 0 && attr) {
+        uint16_t len = OS_MBUF_PKTLEN(attr->om);
+        char json[256] = {0};
+        if (len < sizeof(json) - 1) {
+            ble_hs_mbuf_to_flat(attr->om, json, len, NULL);
+            ESP_LOGI(TAG, "DeviceInfo: %s", json);
+
+            char pay_to[43] = {0};
+            jget(json, "payTo", pay_to, sizeof(pay_to));
+            if (pay_to[0]) {
+                strncpy(s_result.seller_addr, pay_to, sizeof(s_result.seller_addr) - 1);
+                boat_hex_to_bytes(pay_to, s_seller_addr, 20);
+                ESP_LOGI(TAG, "Seller wallet: %s", pay_to);
+            }
+        }
+
+        /* Now send StreamRequest */
+        send_stream_request();
+    } else {
+        ESP_LOGW(TAG, "DeviceInfo read err: %d, sending StreamRequest anyway", error->status);
+        send_stream_request();
+    }
+    return 0;
+}
+
+/* ---- Public API ---- */
+
+esp_err_t ble_buyer_init(const boat_keypair_t *kp)
+{
+    if (!kp) return ESP_ERR_INVALID_ARG;
+    s_kp = kp;
+    memset(&s_result, 0, sizeof(s_result));
+    ESP_LOGI(TAG, "BLE buyer init (ETH: %s)", kp->eth_addr_hex);
+    return ESP_OK;
+}
+
+esp_err_t ble_buyer_start(const char *device_name,
+                           uint32_t max_slices,
+                           uint32_t slice_seconds)
+{
+    if (!s_kp) return ESP_ERR_INVALID_STATE;
+    if (s_result.state >= BLE_BUYER_SCANNING &&
+        s_result.state <= BLE_BUYER_STREAMING)
+        return ESP_ERR_INVALID_STATE;
+
+    memset(&s_result, 0, sizeof(s_result));
+    s_target_found = 0;
+    s_conn = BLE_HS_CONN_HANDLE_NONE;
+    s_max_slices = max_slices > 0 ? max_slices : 24;
+    s_slice_seconds = slice_seconds > 0 ? slice_seconds : 10;
+    s_result.max_slices = s_max_slices;
+    s_result.slice_seconds = s_slice_seconds;
+
+    if (device_name)
+        strncpy(s_target_name, device_name, sizeof(s_target_name) - 1);
+    else
+        s_target_name[0] = '\0';
+
+    s_result.state = BLE_BUYER_SCANNING;
+    ESP_LOGI(TAG, "Scanning for: %s (%" PRIu32 " slices × %" PRIu32 "s)",
+             s_target_name[0] ? s_target_name : "ECandle",
+             s_max_slices, s_slice_seconds);
+
+    /* Pause hashanchor HTTPS to free internal SRAM for BLE */
+    hashanchor_set_paused(1);
+    ESP_LOGI(TAG, "Hashanchor paused for BLE session");
+
+    /* Use passive scan for WiFi coexistence (per ESP-IDF coex example) */
+    struct ble_gap_disc_params params = {
+        .filter_duplicates = 1,
+        .passive = 1,    /* passive scan: no SCAN_REQ, better WiFi coexistence */
+        .itvl = 0,       /* default */
+        .window = 0,     /* default */
+    };
+
+    /* Stop advertising to free radio + memory for central scan */
+    ble_gap_adv_stop();
+
+    uint8_t own_addr_type;
+    int rc = ble_hs_id_infer_auto(0, &own_addr_type);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "ble_hs_id_infer_auto failed: %d", rc);
+        own_addr_type = BLE_OWN_ADDR_PUBLIC;
+    }
+
+    rc = ble_gap_disc(own_addr_type, 15000, &params, gap_event, NULL);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "ble_gap_disc failed: %d", rc);
+        snprintf(s_result.error, sizeof(s_result.error), "scan: %d", rc);
+        s_result.state = BLE_BUYER_ERROR;
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
+const ble_buyer_result_t *ble_buyer_get_result(void)
+{
+    return &s_result;
+}
+
+void ble_buyer_cancel(void)
+{
+    if (s_result.state == BLE_BUYER_SCANNING) ble_gap_disc_cancel();
+    if (s_conn != BLE_HS_CONN_HANDLE_NONE)
+        ble_gap_terminate(s_conn, BLE_ERR_REM_USER_CONN_TERM);
+    stop_mining();
+    s_result.state = BLE_BUYER_IDLE;
+    session_ended();
+}
+
+#endif /* CONFIG_BT_NIMBLE_ROLE_CENTRAL */

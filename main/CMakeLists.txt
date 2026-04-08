@@ -43,6 +43,7 @@ SRCS
     "./power/asic_reset.c"
     "./power/asic_init.c"
     "ble_x402.c"
+    "ble_buyer.c"
 
 INCLUDE_DIRS
     "."

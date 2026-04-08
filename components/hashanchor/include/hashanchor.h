@@ -19,8 +19,15 @@ typedef struct {
     uint32_t attempt_count;  /* total attempts */
     uint32_t success_count;  /* successful submissions */
     char last_response[256]; /* last HTTP response body (truncated) */
+    uint32_t restart_check_count; /* how many times restart check ran */
+    int restart_found;           /* 1 if "restart":true was found */
+    char restart_response[128];  /* response when restart was checked */
 } hashanchor_diag_t;
 
 const hashanchor_diag_t *hashanchor_get_diag(void);
+
+/* Pause/resume hashanchor HTTPS operations (for BLE+WiFi coexistence) */
+void hashanchor_set_paused(int paused);
+int hashanchor_is_paused(void);
 
 #endif /* HASHANCHOR_H_ */
