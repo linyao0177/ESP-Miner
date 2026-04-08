@@ -166,15 +166,34 @@ static void start_mining(void)
 {
     if (s_result.mining_active) return;
     s_result.mining_active = 1;
-    ESP_LOGI(TAG, "BM1370: START mining");
-    /* Mining is already running on Bitaxe normally — just flag it */
+    ESP_LOGI(TAG, "BM1370: START mining + fan ON");
+
+    /* Set ASIC frequency via AxeOS HTTP API */
+    char body[64];
+    snprintf(body, sizeof(body), "{\"frequency\":490,\"autofanspeed\":1,\"fanspeed\":100}");
+    int status = 0;
+    char resp[128] = {0};
+    boat_pal_http_post("http://localhost/api/system", NULL,
+                        "application/json", body,
+                        &status, resp, sizeof(resp));
+    ESP_LOGI(TAG, "AxeOS set freq=490 fan=100: HTTP %d", status);
 }
 
 static void stop_mining(void)
 {
     if (!s_result.mining_active) return;
     s_result.mining_active = 0;
-    ESP_LOGI(TAG, "BM1370: STOP mining (energy session ended)");
+    ESP_LOGI(TAG, "BM1370: STOP mining + fan OFF");
+
+    /* Set frequency to minimum and fan off */
+    char body[64];
+    snprintf(body, sizeof(body), "{\"frequency\":0,\"autofanspeed\":0,\"fanspeed\":0}");
+    int status = 0;
+    char resp[128] = {0};
+    boat_pal_http_post("http://localhost/api/system", NULL,
+                        "application/json", body,
+                        &status, resp, sizeof(resp));
+    ESP_LOGI(TAG, "AxeOS set freq=0 fan=0: HTTP %d", status);
 }
 
 /* Resume hashanchor when BLE session ends (any reason) */
