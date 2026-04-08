@@ -1420,14 +1420,25 @@ static esp_err_t POST_ble_buy_start(httpd_req_t *req)
         }
     }
 
-    /* Parse max_slices and slice_seconds */
+    /* Parse max_slices, slice_seconds, auto, threshold */
     uint32_t max_slices = 24, slice_seconds = 10;
+    uint64_t threshold = 60; /* default $0.000060/slice */
+    int auto_mode = 0;
     char *ms = strstr(body, "\"max_slices\":");
     if (ms) max_slices = (uint32_t)atoi(ms + 13);
     char *ss = strstr(body, "\"slice_seconds\":");
     if (ss) slice_seconds = (uint32_t)atoi(ss + 16);
+    if (strstr(body, "\"auto\":true") || strstr(body, "\"auto\": true"))
+        auto_mode = 1;
+    char *th = strstr(body, "\"threshold\":");
+    if (th) threshold = (uint64_t)atoi(th + 12);
 
-    esp_err_t err = ble_buyer_start(target, max_slices, slice_seconds);
+    esp_err_t err;
+    if (auto_mode) {
+        err = ble_buyer_start_auto(target, threshold, max_slices, slice_seconds);
+    } else {
+        err = ble_buyer_start(target, max_slices, slice_seconds);
+    }
     if (err != ESP_OK) {
         httpd_resp_set_status(req, "409 Conflict");
         httpd_resp_sendstr(req, "{\"error\":\"buy already in progress or not initialized\"}");
@@ -1456,9 +1467,9 @@ static esp_err_t GET_ble_buy_status(httpd_req_t *req)
     }
 
     static const char *state_names[] = {
-        "idle", "scanning", "connecting", "discovering",
+        "idle", "scanning", "waiting", "connecting", "discovering",
         "reading_info", "negotiating", "streaming",
-        "complete", "error"
+        "deciding", "complete", "error"
     };
     const char *state_str = (r->state <= BLE_BUYER_ERROR) ? state_names[r->state] : "unknown";
 
@@ -1489,6 +1500,9 @@ static esp_err_t GET_ble_buy_status(httpd_req_t *req)
     if (r->price_per_slice)
         n += snprintf(json + n, 1024 - n, ",\"price_per_slice\":%llu",
                      (unsigned long long)r->price_per_slice);
+    if (r->auto_mode)
+        n += snprintf(json + n, 1024 - n, ",\"auto\":true,\"threshold\":%llu,\"sessions\":%lu",
+                     (unsigned long long)r->threshold, (unsigned long)r->total_sessions);
     if (r->error[0])
         n += snprintf(json + n, 1024 - n, ",\"error\":\"%s\"", r->error);
 

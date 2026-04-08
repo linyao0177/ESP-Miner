@@ -35,6 +35,11 @@ static const uint8_t USDC_POLYGON[20] = {
 };
 #define CHAIN_ID 137
 
+/* ---- Config ---- */
+#define DEFAULT_THRESHOLD       60   /* $0.000060/slice = ~$0.06/kWh */
+#define SCAN_DURATION_MS      5000   /* 5s per scan cycle */
+#define RESCAN_DELAY_MS       5000   /* wait 5s between scans when waiting */
+
 /* ---- State ---- */
 static const boat_keypair_t *s_kp = NULL;
 static ble_buyer_result_t s_result;
@@ -43,6 +48,9 @@ static char s_target_name[32] = {0};
 static int s_target_found = 0;
 static uint32_t s_max_slices = 24;
 static uint32_t s_slice_seconds = 10;
+static uint16_t s_adv_price = 0;    /* price from advertising data */
+static uint8_t  s_adv_avail = 0;    /* available Wh from advertising */
+static uint8_t  s_adv_state = 0xFF; /* seller state from advertising */
 
 /* Discovered characteristic value handles */
 static uint16_t h_stream_request = 0;
@@ -598,8 +606,19 @@ static void handle_notify(uint16_t attr_handle, const uint8_t *data, uint16_t le
             ESP_LOGI(TAG, "Session COMPLETE: %" PRIu32 " slices, %.4f Wh, %" PRIu64 " USDC",
                      s_result.slices_paid, s_result.total_wh, s_result.total_paid);
             stop_mining();
-            s_result.state = BLE_BUYER_COMPLETE;
-            session_ended();
+            s_result.total_sessions++;
+            s_result.slices_paid = 0; /* reset for next session */
+
+            if (s_result.auto_mode) {
+                /* DECIDING: disconnect, rescan to check price */
+                ESP_LOGI(TAG, "Auto mode: disconnecting, will rescan for price");
+                s_result.state = BLE_BUYER_DECIDING;
+                ble_gap_terminate(s_conn, BLE_ERR_REM_USER_CONN_TERM);
+                /* Rescan will be triggered from disconnect handler */
+            } else {
+                s_result.state = BLE_BUYER_COMPLETE;
+                session_ended();
+            }
         } else if (strcmp(status, "ERROR") == 0) {
             ESP_LOGW(TAG, "Session ERROR from seller");
             stop_mining();
@@ -633,12 +652,47 @@ static int gap_event(struct ble_gap_event *event, void *arg)
                      strstr(name, "ecandle"));
 
         if (match && !s_target_found) {
-            s_target_found = 1;
             strncpy(s_result.seller_name, name, sizeof(s_result.seller_name) - 1);
-            ESP_LOGI(TAG, "Found: %s", name);
-            ble_gap_disc_cancel();
 
+            /* Parse manufacturer specific data for price */
+            if (fields.mfg_data && fields.mfg_data_len >= 6) {
+                const uint8_t *mfg = fields.mfg_data;
+                /* [0-1]=company, [2-3]=price_per_slice LE, [4]=avail_wh, [5]=state */
+                s_adv_price = (uint16_t)mfg[2] | ((uint16_t)mfg[3] << 8);
+                s_adv_avail = mfg[4];
+                s_adv_state = mfg[5];
+                s_result.price_per_slice = s_adv_price;
+                s_result.seller_available_wh = s_adv_avail;
+                s_result.seller_state = s_adv_state;
+                ESP_LOGI(TAG, "Found: %s price=%" PRIu16 " avail=%d state=%d",
+                         name, s_adv_price, s_adv_avail, s_adv_state);
+            } else {
+                ESP_LOGI(TAG, "Found: %s (no mfg data, will read DeviceInfo)", name);
+                s_adv_price = 0;
+                s_adv_state = 0; /* assume IDLE */
+            }
+
+            /* Auto mode: check profitability before connecting */
+            if (s_result.auto_mode && s_adv_price > 0) {
+                if (s_adv_price > s_result.threshold) {
+                    ESP_LOGI(TAG, "Price %" PRIu16 " > threshold %" PRIu64 ", waiting",
+                             s_adv_price, s_result.threshold);
+                    s_result.state = BLE_BUYER_WAITING;
+                    /* Don't connect, let scan complete, will rescan */
+                    break;
+                }
+                if (s_adv_state != 0) { /* 0 = IDLE */
+                    ESP_LOGI(TAG, "Seller state %d != IDLE, waiting", s_adv_state);
+                    s_result.state = BLE_BUYER_WAITING;
+                    break;
+                }
+            }
+
+            /* Profitable or single-shot mode → connect */
+            s_target_found = 1;
+            ble_gap_disc_cancel();
             s_result.state = BLE_BUYER_CONNECTING;
+            ESP_LOGI(TAG, "Connecting to %s (price=%" PRIu64 ")", name, s_result.price_per_slice);
             int rc = ble_gap_connect(BLE_OWN_ADDR_PUBLIC, &event->disc.addr,
                                       10000, NULL, gap_event, NULL);
             if (rc != 0) {
@@ -651,10 +705,27 @@ static int gap_event(struct ble_gap_event *event, void *arg)
 
     case BLE_GAP_EVENT_DISC_COMPLETE:
         if (!s_target_found) {
-            ESP_LOGW(TAG, "Scan done, no ECandle found");
-            snprintf(s_result.error, sizeof(s_result.error), "no ECandle found");
-            s_result.state = BLE_BUYER_ERROR;
-            session_ended();
+            if (s_result.auto_mode) {
+                /* Auto mode: rescan after delay */
+                if (s_result.state == BLE_BUYER_WAITING) {
+                    ESP_LOGI(TAG, "Price too high, rescan in %dms", RESCAN_DELAY_MS);
+                } else {
+                    ESP_LOGI(TAG, "No ECandle found, rescan in %dms", RESCAN_DELAY_MS);
+                    s_result.state = BLE_BUYER_SCANNING;
+                }
+                vTaskDelay(pdMS_TO_TICKS(RESCAN_DELAY_MS));
+                s_target_found = 0;
+                struct ble_gap_disc_params params = { .filter_duplicates = 1, .passive = 1 };
+                ble_gap_adv_stop();
+                uint8_t addr_type;
+                ble_hs_id_infer_auto(0, &addr_type);
+                ble_gap_disc(addr_type, SCAN_DURATION_MS, &params, gap_event, NULL);
+            } else {
+                ESP_LOGW(TAG, "Scan done, no ECandle found");
+                snprintf(s_result.error, sizeof(s_result.error), "no ECandle found");
+                s_result.state = BLE_BUYER_ERROR;
+                session_ended();
+            }
         }
         break;
 
@@ -686,14 +757,26 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         s_conn = BLE_HS_CONN_HANDLE_NONE;
         stop_mining();
 
-        if (s_result.state == BLE_BUYER_STREAMING ||
-            s_result.state == BLE_BUYER_NEGOTIATING) {
+        if (s_result.state == BLE_BUYER_DECIDING) {
+            /* Session complete, rescan to check price for next buy */
+            ESP_LOGI(TAG, "Session done (total=%d), rescanning for price...",
+                     (int)s_result.total_sessions);
+            s_target_found = 0;
+            s_result.state = BLE_BUYER_SCANNING;
+            vTaskDelay(pdMS_TO_TICKS(2000)); /* brief delay before rescan */
+            struct ble_gap_disc_params params = { .filter_duplicates = 0, .passive = 1 };
+            ble_gap_adv_stop();
+            uint8_t addr_type;
+            ble_hs_id_infer_auto(0, &addr_type);
+            ble_gap_disc(addr_type, SCAN_DURATION_MS, &params, gap_event, NULL);
+        } else if (s_result.state == BLE_BUYER_STREAMING ||
+                   s_result.state == BLE_BUYER_NEGOTIATING) {
             /* Unexpected disconnect during session — auto reconnect */
             ESP_LOGW(TAG, "Session interrupted, reconnecting...");
             s_target_found = 0;
             s_result.state = BLE_BUYER_SCANNING;
             struct ble_gap_disc_params params = { .filter_duplicates = 1, .passive = 1 };
-            ble_gap_disc(BLE_OWN_ADDR_PUBLIC, 15000, &params, gap_event, NULL);
+            ble_gap_disc(BLE_OWN_ADDR_PUBLIC, SCAN_DURATION_MS, &params, gap_event, NULL);
         } else if (s_result.state != BLE_BUYER_COMPLETE &&
                    s_result.state != BLE_BUYER_ERROR) {
             s_result.state = BLE_BUYER_COMPLETE;
@@ -762,6 +845,21 @@ esp_err_t ble_buyer_init(const boat_keypair_t *kp)
     memset(&s_result, 0, sizeof(s_result));
     ESP_LOGI(TAG, "BLE buyer init (ETH: %s)", kp->eth_addr_hex);
     return ESP_OK;
+}
+
+esp_err_t ble_buyer_start_auto(const char *device_name,
+                                uint64_t threshold,
+                                uint32_t max_slices,
+                                uint32_t slice_seconds)
+{
+    if (!s_kp) return ESP_ERR_INVALID_STATE;
+    esp_err_t err = ble_buyer_start(device_name, max_slices, slice_seconds);
+    if (err == ESP_OK) {
+        s_result.auto_mode = 1;
+        s_result.threshold = threshold > 0 ? threshold : DEFAULT_THRESHOLD;
+        ESP_LOGI(TAG, "Auto mode: threshold=%" PRIu64 " USDC/slice", s_result.threshold);
+    }
+    return err;
 }
 
 esp_err_t ble_buyer_start(const char *device_name,
