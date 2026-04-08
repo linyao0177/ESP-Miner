@@ -304,6 +304,14 @@ static void sign_and_send_slice(const char *slice_json)
     ESP_LOGI(TAG, "Slice #%" PRIu32 "/%" PRIu32 " paid, total=%" PRIu64,
              s_result.slices_paid, s_result.max_slices, s_result.total_paid);
 
+    /* Energy management: stop BM1370 early to reserve power for ESP32.
+     * BM1370 ~15W, ESP32 ~2W. Reserve last 2 slices for ESP32 standby
+     * so it can complete BLE negotiation for next purchase. */
+    if (s_result.slices_paid >= s_result.max_slices - 2 && s_result.mining_active) {
+        ESP_LOGW(TAG, "Approaching max slices — stopping BM1370 to reserve ESP32 power");
+        stop_mining();
+    }
+
     /* Read DeviceInfo after payment to get verify debug (last_verify field) */
     if (h_device_info && s_conn != BLE_HS_CONN_HANDLE_NONE) {
         ble_gattc_read(s_conn, h_device_info, on_verify_debug_read, NULL);
