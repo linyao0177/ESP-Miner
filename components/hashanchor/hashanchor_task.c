@@ -19,6 +19,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
+#include <esp_sntp.h>
 
 static const char *TAG = "ha_task";
 
@@ -138,6 +139,22 @@ void hashanchor_task(void *pvParameters)
     /* Wait for WiFi connection */
     while (!state->SYSTEM_MODULE.is_connected) {
         vTaskDelay(pdMS_TO_TICKS(5000));
+    }
+
+    /* Initialize SNTP for correct timestamps (EIP-3009 validBefore) */
+    esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, "pool.ntp.org");
+    esp_sntp_init();
+    ESP_LOGI(TAG, "SNTP initialized, waiting for time sync...");
+
+    /* Wait up to 15 seconds for NTP sync */
+    for (int i = 0; i < 30; i++) {
+        time_t now = time(NULL);
+        if (now > 1700000000) { /* after 2023-11-14 */
+            ESP_LOGI(TAG, "Time synced: %ld", (long)now);
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(500));
     }
 
     ESP_LOGI(TAG, "WiFi connected, initializing boat-mwr crypto...");
