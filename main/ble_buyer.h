@@ -37,6 +37,13 @@ typedef struct {
     float total_wh;              /* total Wh received (all sessions) */
     int mining_active;           /* 1 if BM1370 is running */
     int auto_mode;               /* 1 if autonomous loop is running */
+    int last_write_rc;           /* rc from last ble_gattc_write_flat */
+    int last_write_len;          /* bytes written in last SlicePayment */
+    int last_mtu;                /* negotiated MTU */
+    uint16_t h_payment;          /* discovered SlicePayment handle */
+    uint16_t h_request;          /* discovered StreamRequest handle */
+    uint16_t svc_start;          /* 0xEE00 service start handle */
+    uint16_t svc_end;            /* 0xEE00 service end handle */
     uint8_t seller_available_wh; /* from advertising */
     uint8_t seller_state;        /* from advertising (0=IDLE) */
     char error[128];

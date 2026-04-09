@@ -1500,6 +1500,11 @@ static esp_err_t GET_ble_buy_status(httpd_req_t *req)
     if (r->price_per_slice)
         n += snprintf(json + n, 1024 - n, ",\"price_per_slice\":%llu",
                      (unsigned long long)r->price_per_slice);
+    n += snprintf(json + n, 1024 - n,
+        ",\"write_rc\":%d,\"write_len\":%d,\"mtu\":%d"
+        ",\"h_pay\":%d,\"h_req\":%d,\"svc\":\"%d-%d\"",
+        r->last_write_rc, r->last_write_len, r->last_mtu,
+        r->h_payment, r->h_request, r->svc_start, r->svc_end);
     if (r->auto_mode)
         n += snprintf(json + n, 1024 - n, ",\"auto\":true,\"threshold\":%llu,\"sessions\":%lu",
                      (unsigned long long)r->threshold, (unsigned long)r->total_sessions);

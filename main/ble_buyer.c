@@ -7,6 +7,8 @@
 #include <stdlib.h>
 #include <inttypes.h>
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/timers.h"
 #include "host/ble_hs.h"
 #include "host/ble_uuid.h"
 #include "host/ble_gap.h"
@@ -133,20 +135,24 @@ static int auth_to_json(const boat_nano_auth_t *a, char *out, size_t max)
     snprintf(r_h, 67, "0x");    boat_bytes_to_hex(a->r, 32, r_h + 2);
     snprintf(s_h, 67, "0x");    boat_bytes_to_hex(a->s, 32, s_h + 2);
 
-    /* Convert value from uint256 big-endian to decimal string */
-    uint64_t val_dec = 0;
-    for (int i = 24; i < 32; i++) /* lower 8 bytes sufficient for USDC amounts */
-        val_dec = (val_dec << 8) | a->value[i];
-    char val_str[21];
-    snprintf(val_str, sizeof(val_str), "%" PRIu64, val_dec);
+    /* Compact signature: 0x + r(64) + s(64) + v(2) = 132 hex chars */
+    char sig_h[135];
+    memcpy(sig_h, "0x", 2);
+    boat_bytes_to_hex(a->r, 32, sig_h + 2);
+    boat_bytes_to_hex(a->s, 32, sig_h + 66);
+    snprintf(sig_h + 130, 5, "%02x", (unsigned)a->v);
 
+    /* Decimal value */
+    uint64_t val_dec = 0;
+    for (int i = 24; i < 32; i++)
+        val_dec = (val_dec << 8) | a->value[i];
+
+    /* Minimal JSON (~220 bytes): omit from/to (eCandle knows both from session).
+     * Must be < 253 bytes (MTU 256 - 3 ATT overhead). */
     return snprintf(out, max,
-        "{\"from\":\"%s\",\"to\":\"%s\",\"value\":\"%s\","
-        "\"valid_after\":%" PRIu32 ",\"valid_before\":%" PRIu32 ","
-        "\"nonce\":\"%s\",\"v\":%u,\"r\":\"%s\",\"s\":\"%s\"}",
-        from_h, to_h, val_str,
-        a->valid_after, a->valid_before,
-        nonce_h, (unsigned)a->v, r_h, s_h);
+        "{\"va\":\"%" PRIu64 "\",\"vb\":%" PRIu32 ","
+        "\"n\":\"%s\",\"sig\":\"%s\"}",
+        val_dec, a->valid_before, nonce_h, sig_h);
 }
 
 /* ---- Forward declarations ---- */
@@ -154,6 +160,7 @@ static int gap_event(struct ble_gap_event *event, void *arg);
 static void sign_and_send_slice(const char *slice_json);
 static void start_mining(void);
 static void stop_mining(void);
+static void deferred_first_payment(void *arg1, uint32_t arg2);
 static int on_info_read(uint16_t conn, const struct ble_gatt_error *error,
                          struct ble_gatt_attr *attr, void *arg);
 static int on_verify_debug_read(uint16_t conn, const struct ble_gatt_error *error,
@@ -287,14 +294,18 @@ static void sign_and_send_slice(const char *slice_json)
              s_result.slices_paid + 1, auth.v, len);
 
     /* Write to SlicePayment characteristic */
+    s_result.last_write_len = len;
     int rc = ble_gattc_write_flat(s_conn, h_slice_payment,
                                    pay_json, (uint16_t)len,
                                    NULL, NULL);
+    s_result.last_write_rc = rc;
     free(pay_json);
 
+    ESP_LOGI(TAG, "write_flat rc=%d len=%d handle=%d", rc, len, h_slice_payment);
+
     if (rc != 0) {
-        ESP_LOGE(TAG, "BLE write failed: %d", rc);
-        snprintf(s_result.error, sizeof(s_result.error), "write: %d", rc);
+        ESP_LOGE(TAG, "BLE write failed: %d (len=%d, handle=%d)", rc, len, h_slice_payment);
+        snprintf(s_result.error, sizeof(s_result.error), "write:%d len=%d h=%d", rc, len, h_slice_payment);
         s_result.state = BLE_BUYER_ERROR;
         return;
     }
@@ -315,6 +326,16 @@ static void sign_and_send_slice(const char *slice_json)
     /* Read DeviceInfo after payment to get verify debug (last_verify field) */
     if (h_device_info && s_conn != BLE_HS_CONN_HANDLE_NONE) {
         ble_gattc_read(s_conn, h_device_info, on_verify_debug_read, NULL);
+    }
+}
+
+/* Deferred first payment: runs from timer service task after 2s delay */
+static void deferred_first_payment(void *arg1, uint32_t arg2)
+{
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    if (s_result.state == BLE_BUYER_STREAMING && s_conn != BLE_HS_CONN_HANDLE_NONE) {
+        ESP_LOGI(TAG, "Sending deferred first SlicePayment...");
+        sign_and_send_slice(NULL);
     }
 }
 
@@ -383,10 +404,10 @@ static int on_chr_disc(uint16_t conn, const struct ble_gatt_error *error,
         uint16_t uuid = ble_uuid_u16(&chr->uuid.u);
         ESP_LOGI(TAG, "  chr 0x%04X def=%d val=%d", uuid, chr->def_handle, chr->val_handle);
         switch (uuid) {
-            case CHR_STREAM_REQUEST: h_stream_request = chr->val_handle; break;
+            case CHR_STREAM_REQUEST: h_stream_request = chr->val_handle; s_result.h_request = chr->val_handle; break;
             case CHR_STREAM_OFFER:   h_stream_offer = chr->val_handle; break;
             case CHR_SLICE_REQUEST:  h_slice_request = chr->val_handle; break;
-            case CHR_SLICE_PAYMENT:  h_slice_payment = chr->val_handle; break;
+            case CHR_SLICE_PAYMENT:  h_slice_payment = chr->val_handle; s_result.h_payment = chr->val_handle; break;
             case CHR_STREAM_STATUS:  h_stream_status = chr->val_handle; break;
             case CHR_DEVICE_INFO:    h_device_info = chr->val_handle; break;
         }
@@ -419,6 +440,8 @@ static int on_svc_disc(uint16_t conn, const struct ble_gatt_error *error,
         ESP_LOGI(TAG, "Found 0xEE00 service: %d-%d",
                  svc->start_handle, svc->end_handle);
         s_svc_end_handle = svc->end_handle;
+        s_result.svc_start = svc->start_handle;
+        s_result.svc_end = svc->end_handle;
         ble_gattc_disc_all_chrs(conn, svc->start_handle, svc->end_handle,
                                  on_chr_disc, NULL);
     } else if (error->status == BLE_HS_EDONE) {
@@ -556,14 +579,19 @@ static int on_fallback_info_read(uint16_t conn, const struct ble_gatt_error *err
 
             if (strcmp(state_str, "NEGOTIATING") == 0 ||
                 strcmp(state_str, "IDLE") == 0) {
-                /* eCandle processed StreamRequest — use known price as fallback */
-                ESP_LOGW(TAG, "StreamOffer notify not received, using fallback price");
+                /* eCandle processed StreamRequest — use known price as fallback.
+                 * Defer SlicePayment by 2s to let eCandle finish processing.
+                 * Can't vTaskDelay in BLE callback — use timer. */
+                ESP_LOGW(TAG, "StreamOffer not received, deferring payment 2s...");
 
                 if (s_result.price_per_slice == 0)
-                    s_result.price_per_slice = 42; /* $0.000042 USDC */
+                    s_result.price_per_slice = 42;
 
                 s_result.state = BLE_BUYER_STREAMING;
-                sign_and_send_slice(NULL);
+                /* Use xTimerPendFunctionCall for deferred execution */
+                xTimerPendFunctionCall(
+                    (PendedFunction_t)deferred_first_payment,
+                    NULL, 0, pdMS_TO_TICKS(100));
                 start_mining();
             }
         }
@@ -788,9 +816,8 @@ static int gap_event(struct ble_gap_event *event, void *arg)
             s_conn = event->connect.conn_handle;
             ESP_LOGI(TAG, "Connected (handle=%d)", s_conn);
 
-            /* MTU 256: saves ~500 bytes SRAM vs 517, payment JSON ~480 bytes
-             * will be sent in 2 chunks if MTU < 480, which is fine */
-            ble_att_set_preferred_mtu(256);
+            /* MTU 512: SlicePayment JSON is ~480 bytes, needs MTU > 480 */
+            ble_att_set_preferred_mtu(512);
             ble_gattc_exchange_mtu(s_conn, NULL, NULL);
 
             s_result.state = BLE_BUYER_DISCOVERING;
@@ -839,6 +866,7 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         break;
 
     case BLE_GAP_EVENT_MTU:
+        s_result.last_mtu = event->mtu.value;
         ESP_LOGI(TAG, "MTU: %d", event->mtu.value);
         break;
 
