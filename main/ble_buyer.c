@@ -243,7 +243,7 @@ static void sign_and_send_slice(const char *slice_json)
         /* First slice: no slice_request yet */
         boat_pal_random(slice.nonce, 32);
         slice.valid_after = 0;
-        slice.valid_before = boat_pal_time() + 3600;
+        slice.valid_before = boat_pal_time() + 345600; /* 4 days — Circle Gateway minimum */
     }
 
     /* Set EIP-712 domain for Arc Testnet Gateway */
