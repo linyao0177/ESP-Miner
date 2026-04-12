@@ -43,9 +43,9 @@ static const uint8_t GATEWAY_ARC[20] __attribute__((unused)) = {
     0x3E, 0x31, 0x1b, 0x84, 0x6F, 0x25, 0x87, 0x0A, 0x19, 0xB9
 };
 #define CHAIN_ID        5042002
-/* BLE energy: direct on-chain settle via USDC transferWithAuthorization */
-#define DOMAIN_NAME     "USDC"
-#define DOMAIN_VERSION  "2"
+/* Circle Gateway batch settle (Arc USDC doesn't support EIP-3009 directly) */
+#define DOMAIN_NAME     "GatewayWalletBatched"
+#define DOMAIN_VERSION  "1"
 
 /* ---- Config ---- */
 #define DEFAULT_THRESHOLD       60   /* $0.000060/slice = ~$0.06/kWh */
@@ -317,8 +317,8 @@ static void sign_and_send_slice(const char *slice_json)
         slice.valid_before = boat_pal_time() + 345600; /* 4 days — Circle Gateway minimum */
     }
 
-    /* Set EIP-712 domain for direct on-chain settle (USDC contract as verifyingContract) */
-    boat_pay_set_domain_ext(CHAIN_ID, USDC_ARC, DOMAIN_NAME, DOMAIN_VERSION);
+    /* Set EIP-712 domain: GatewayWalletBatched (Arc USDC doesn't support EIP-3009 directly) */
+    boat_pay_set_domain_ext(CHAIN_ID, GATEWAY_ARC, DOMAIN_NAME, DOMAIN_VERSION);
 
     /* Build payment struct */
     boat_payment_t pay;
