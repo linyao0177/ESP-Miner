@@ -87,44 +87,49 @@ static void oled_update(void)
 {
     char l1[48], l2[48], l3[48];
 
+    /* Convert price: 1 Wh ≈ 24 slices, 1 kWh = 24000 slices
+     * price_per_kWh = price_per_slice * 24000 / 1000000 */
+    double price_kwh = (double)s_result.price_per_slice * 24.0 / 1000.0;
+    double paid_usd = (double)s_result.total_paid / 1000000.0;
+
     switch (s_result.state) {
     case BLE_BUYER_SCANNING:
         snprintf(l1, 48, "Scanning...");
-        snprintf(l2, 48, "Thr: $%.6f/sl", (double)s_result.threshold / 1000000.0);
+        snprintf(l2, 48, "Max $%.2f/kWh", (double)s_result.threshold * 24.0 / 1000.0);
         l3[0] = '\0';
         break;
     case BLE_BUYER_WAITING:
-        snprintf(l1, 48, "%s $%.4f", s_result.seller_name, (double)s_result.price_per_slice / 1000000.0);
-        snprintf(l2, 48, "Too expensive");
+        snprintf(l1, 48, "%s", s_result.seller_name);
+        snprintf(l2, 48, "$%.2f/kWh TOO HIGH", price_kwh);
         l3[0] = '\0';
         break;
     case BLE_BUYER_CONNECTING:
     case BLE_BUYER_DISCOVERING:
     case BLE_BUYER_READING_INFO:
     case BLE_BUYER_NEGOTIATING:
-        snprintf(l1, 48, "Connecting...");
-        snprintf(l2, 48, "$%.6f/slice", (double)s_result.price_per_slice / 1000000.0);
+        snprintf(l1, 48, "Connecting %s", s_result.seller_name);
+        snprintf(l2, 48, "$%.2f/kWh", price_kwh);
         l3[0] = '\0';
         break;
     case BLE_BUYER_STREAMING:
-        snprintf(l1, 48, "Mining");
-        snprintf(l2, 48, "Slice %lu/%lu", (unsigned long)s_result.slices_paid,
+        snprintf(l1, 48, "MINING $%.2f/kWh", price_kwh);
+        snprintf(l2, 48, "Slice %lu/%lu",
+                 (unsigned long)s_result.slices_paid,
                  (unsigned long)s_result.max_slices);
-        snprintf(l3, 48, "$%.6f paid", (double)s_result.total_paid / 1000000.0);
+        snprintf(l3, 48, "$%.6f paid", paid_usd);
         break;
     case BLE_BUYER_DECIDING:
-        snprintf(l1, 48, "Session done");
-        snprintf(l2, 48, "Sessions: %lu", (unsigned long)s_result.total_sessions);
+        snprintf(l1, 48, "Session #%lu done", (unsigned long)s_result.total_sessions);
+        snprintf(l2, 48, "$%.6f total", paid_usd);
         snprintf(l3, 48, "Checking price...");
         break;
     case BLE_BUYER_COMPLETE:
         snprintf(l1, 48, "Complete");
-        snprintf(l2, 48, "S:%lu $%.6f", (unsigned long)s_result.total_sessions,
-                 (double)s_result.total_paid / 1000000.0);
-        l3[0] = '\0';
+        snprintf(l2, 48, "%lu sessions", (unsigned long)s_result.total_sessions);
+        snprintf(l3, 48, "$%.6f total", paid_usd);
         break;
     default:
-        snprintf(l1, 48, "BLE Buy");
+        snprintf(l1, 48, "BLE Energy Buy");
         snprintf(l2, 48, "Idle");
         l3[0] = '\0';
     }
