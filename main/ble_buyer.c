@@ -87,9 +87,9 @@ static void oled_update(void)
 {
     char l1[48], l2[48], l3[48];
 
-    /* Convert price: 1 Wh ≈ 24 slices, 1 kWh = 24000 slices
-     * price_per_kWh = price_per_slice * 24000 / 1000000 */
-    double price_kwh = (double)s_result.price_per_slice * 24.0 / 1000.0;
+    /* Convert price: price_per_kWh = price_per_slice / 1000
+     * (per eCandle PRD: 42 μUSD/slice = $0.042/kWh) */
+    double price_kwh = (double)s_result.price_per_slice / 1000.0;
     double paid_usd = (double)s_result.total_paid / 1000000.0;
 
     switch (s_result.state) {
