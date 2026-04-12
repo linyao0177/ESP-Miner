@@ -18,6 +18,7 @@
 #include "boat_pay.h"
 #include "boat_pal.h"
 #include "hashanchor.h"
+#include "display.h"
 
 static const char *TAG = "ble_buyer";
 
@@ -79,6 +80,56 @@ static uint16_t s_svc_end_handle = 0;
 
 /* Seller address in binary */
 static uint8_t s_seller_addr[20] = {0};
+
+/* ---- OLED display helper ---- */
+static void oled_update(void)
+{
+    char l1[48], l2[48], l3[48];
+
+    switch (s_result.state) {
+    case BLE_BUYER_SCANNING:
+        snprintf(l1, 48, "Scanning...");
+        snprintf(l2, 48, "Thr: $%.6f/sl", (double)s_result.threshold / 1000000.0);
+        l3[0] = '\0';
+        break;
+    case BLE_BUYER_WAITING:
+        snprintf(l1, 48, "%s $%.4f", s_result.seller_name, (double)s_result.price_per_slice / 1000000.0);
+        snprintf(l2, 48, "Too expensive");
+        l3[0] = '\0';
+        break;
+    case BLE_BUYER_CONNECTING:
+    case BLE_BUYER_DISCOVERING:
+    case BLE_BUYER_READING_INFO:
+    case BLE_BUYER_NEGOTIATING:
+        snprintf(l1, 48, "Connecting...");
+        snprintf(l2, 48, "$%.6f/slice", (double)s_result.price_per_slice / 1000000.0);
+        l3[0] = '\0';
+        break;
+    case BLE_BUYER_STREAMING:
+        snprintf(l1, 48, "Mining");
+        snprintf(l2, 48, "Slice %lu/%lu", (unsigned long)s_result.slices_paid,
+                 (unsigned long)s_result.max_slices);
+        snprintf(l3, 48, "$%.6f paid", (double)s_result.total_paid / 1000000.0);
+        break;
+    case BLE_BUYER_DECIDING:
+        snprintf(l1, 48, "Session done");
+        snprintf(l2, 48, "Sessions: %lu", (unsigned long)s_result.total_sessions);
+        snprintf(l3, 48, "Checking price...");
+        break;
+    case BLE_BUYER_COMPLETE:
+        snprintf(l1, 48, "Complete");
+        snprintf(l2, 48, "S:%lu $%.6f", (unsigned long)s_result.total_sessions,
+                 (double)s_result.total_paid / 1000000.0);
+        l3[0] = '\0';
+        break;
+    default:
+        snprintf(l1, 48, "BLE Buy");
+        snprintf(l2, 48, "Idle");
+        l3[0] = '\0';
+    }
+
+    screen_ble_buy_update(l1, l2, l3[0] ? l3 : NULL);
+}
 
 /* ---- JSON helpers ---- */
 
@@ -213,6 +264,7 @@ static void session_ended(void)
 {
     hashanchor_set_paused(0);
     ESP_LOGI(TAG, "Hashanchor resumed");
+    oled_update();
 }
 
 /* ---- Sign a slice payment and write to eCandle ---- */
@@ -317,6 +369,7 @@ static void sign_and_send_slice(const char *slice_json)
 
     s_result.slices_paid++;
     s_result.total_paid += s_result.price_per_slice;
+    oled_update();
     ESP_LOGI(TAG, "Slice #%" PRIu32 "/%" PRIu32 " paid, total=%" PRIu64,
              s_result.slices_paid, s_result.max_slices, s_result.total_paid);
 
@@ -594,6 +647,7 @@ static int on_fallback_info_read(uint16_t conn, const struct ble_gatt_error *err
 
                 s_result.state = BLE_BUYER_STREAMING;
                 /* Use xTimerPendFunctionCall for deferred execution */
+                oled_update();
                 xTimerPendFunctionCall(
                     (PendedFunction_t)deferred_first_payment,
                     NULL, 0, pdMS_TO_TICKS(100));
@@ -658,6 +712,7 @@ static void handle_notify(uint16_t attr_handle, const uint8_t *data, uint16_t le
         /* Send first SlicePayment immediately */
         s_result.state = BLE_BUYER_STREAMING;
         sign_and_send_slice(NULL);
+                oled_update();
         start_mining();
 
     } else if (attr_handle == h_slice_request) {
@@ -766,11 +821,13 @@ static int gap_event(struct ble_gap_event *event, void *arg)
                              s_adv_price, s_result.threshold);
                     s_result.state = BLE_BUYER_WAITING;
                     /* Don't connect, let scan complete, will rescan */
+                    oled_update();
                     break;
                 }
                 if (s_adv_state != 0) { /* 0 = IDLE */
                     ESP_LOGI(TAG, "Seller state %d != IDLE, waiting", s_adv_state);
                     s_result.state = BLE_BUYER_WAITING;
+                    oled_update();
                     break;
                 }
             }
@@ -800,6 +857,7 @@ static int gap_event(struct ble_gap_event *event, void *arg)
                     ESP_LOGI(TAG, "No ECandle found, rescan in %dms", RESCAN_DELAY_MS);
                     s_result.state = BLE_BUYER_SCANNING;
                 }
+    oled_update();
                 vTaskDelay(pdMS_TO_TICKS(RESCAN_DELAY_MS));
                 s_target_found = 0;
                 struct ble_gap_disc_params params = { .filter_duplicates = 1, .passive = 1 };
@@ -850,6 +908,7 @@ static int gap_event(struct ble_gap_event *event, void *arg)
             s_target_found = 0;
             s_result.state = BLE_BUYER_SCANNING;
             vTaskDelay(pdMS_TO_TICKS(2000)); /* brief delay before rescan */
+    oled_update();
             struct ble_gap_disc_params params = { .filter_duplicates = 0, .passive = 1 };
             ble_gap_adv_stop();
             uint8_t addr_type;
@@ -862,6 +921,7 @@ static int gap_event(struct ble_gap_event *event, void *arg)
             s_target_found = 0;
             s_result.state = BLE_BUYER_SCANNING;
             struct ble_gap_disc_params params = { .filter_duplicates = 1, .passive = 1 };
+    oled_update();
             ble_gap_disc(BLE_OWN_ADDR_PUBLIC, SCAN_DURATION_MS, &params, gap_event, NULL);
         } else if (s_result.state != BLE_BUYER_COMPLETE &&
                    s_result.state != BLE_BUYER_ERROR) {
@@ -975,6 +1035,7 @@ esp_err_t ble_buyer_start(const char *device_name,
     ESP_LOGI(TAG, "Scanning for: %s (%" PRIu32 " slices × %" PRIu32 "s)",
              s_target_name[0] ? s_target_name : "ECandle",
              s_max_slices, s_slice_seconds);
+    oled_update();
 
     /* Pause hashanchor HTTPS to free internal SRAM for BLE */
     hashanchor_set_paused(1);

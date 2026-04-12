@@ -33,4 +33,7 @@ esp_err_t display_init(void * pvParameters);
 esp_err_t display_on(bool display_on);
 const DisplayConfig * get_display_config(const char * name);
 
+/* BLE buyer screen update (called from ble_buyer.c) */
+void screen_ble_buy_update(const char *line1, const char *line2, const char *line3);
+
 #endif /* DISPLAY_H_ */

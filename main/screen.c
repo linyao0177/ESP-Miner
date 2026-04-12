@@ -25,6 +25,7 @@ typedef enum {
     SCR_MINING,
     SCR_WIFI,
     SCR_X402_PAY,
+    SCR_BLE_BUY,
     MAX_SCREENS,
 } screen_t;
 
@@ -78,6 +79,9 @@ static lv_obj_t *wifi_signal_strength_label;
 static lv_obj_t *wifi_uptime_label;
 
 static lv_obj_t *x402_pay_label;
+static lv_obj_t *ble_buy_line1;
+static lv_obj_t *ble_buy_line2;
+static lv_obj_t *ble_buy_line3;
 
 static lv_obj_t *notification_label;
 static lv_obj_t *identify_image;
@@ -402,6 +406,35 @@ static lv_obj_t * create_scr_x402_pay(const char * ip_addr) {
     lv_label_set_text(x402_pay_label, "Scan to pay");
 
     return scr;
+}
+
+static lv_obj_t * create_scr_ble_buy() {
+    lv_obj_t * scr = create_flex_screen(3);
+
+    ble_buy_line1 = lv_label_create(scr);
+    lv_obj_set_width(ble_buy_line1, LV_HOR_RES);
+    lv_label_set_text(ble_buy_line1, "BLE Energy Buy");
+
+    ble_buy_line2 = lv_label_create(scr);
+    lv_obj_set_width(ble_buy_line2, LV_HOR_RES);
+    lv_label_set_text(ble_buy_line2, "Idle");
+
+    ble_buy_line3 = lv_label_create(scr);
+    lv_obj_set_width(ble_buy_line3, LV_HOR_RES);
+    lv_label_set_long_mode(ble_buy_line3, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_label_set_text(ble_buy_line3, "");
+
+    return scr;
+}
+
+void screen_ble_buy_update(const char *line1, const char *line2, const char *line3)
+{
+    if (ble_buy_line1 && lvgl_port_lock(0)) {
+        if (line1) lv_label_set_text(ble_buy_line1, line1);
+        if (line2) lv_label_set_text(ble_buy_line2, line2);
+        if (line3) lv_label_set_text(ble_buy_line3, line3);
+        lvgl_port_unlock();
+    }
 }
 
 static void scr_create_overlay()
@@ -747,6 +780,7 @@ esp_err_t screen_start(void * pvParameters)
             screens[SCR_MINING] = create_scr_mining();
             screens[SCR_WIFI] = create_scr_wifi();
             screens[SCR_X402_PAY] = create_scr_x402_pay(SYSTEM_MODULE->ip_addr_str);
+            screens[SCR_BLE_BUY] = create_scr_ble_buy();
 
             scr_create_overlay();
 
