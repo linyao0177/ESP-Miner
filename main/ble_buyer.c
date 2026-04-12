@@ -30,10 +30,15 @@ static const char *TAG = "ble_buyer";
 #define CHR_STREAM_STATUS    0xEE05  /* Notify: session status */
 #define CHR_DEVICE_INFO      0xEE06  /* Read: seller info + wallet */
 
-/* Arc Testnet USDC (Circle Gateway) */
-static const uint8_t USDC_ARC[20] = {
+/* Arc Testnet USDC contract (for reference in paymentRequirements) */
+static const uint8_t USDC_ARC[20] __attribute__((unused)) = {
     0x36, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+};
+/* Circle Gateway contract (verifyingContract for EIP-712 domain) */
+static const uint8_t GATEWAY_ARC[20] = {
+    0x00, 0x77, 0x77, 0x7d, 0x7E, 0xBA, 0x46, 0x88, 0xBD, 0xeF,
+    0x3E, 0x31, 0x1b, 0x84, 0x6F, 0x25, 0x87, 0x0A, 0x19, 0xB9
 };
 #define CHAIN_ID        5042002
 #define DOMAIN_NAME     "GatewayWalletBatched"
@@ -246,8 +251,8 @@ static void sign_and_send_slice(const char *slice_json)
         slice.valid_before = boat_pal_time() + 345600; /* 4 days — Circle Gateway minimum */
     }
 
-    /* Set EIP-712 domain for Arc Testnet Gateway */
-    boat_pay_set_domain_ext(CHAIN_ID, USDC_ARC, DOMAIN_NAME, DOMAIN_VERSION);
+    /* Set EIP-712 domain: GatewayWalletBatched with Gateway verifyingContract */
+    boat_pay_set_domain_ext(CHAIN_ID, GATEWAY_ARC, DOMAIN_NAME, DOMAIN_VERSION);
 
     /* Build payment struct */
     boat_payment_t pay;
