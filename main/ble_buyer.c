@@ -19,6 +19,7 @@
 #include "boat_pal.h"
 #include "hashanchor.h"
 #include "display.h"
+#include "nvs_config.h"
 
 static const char *TAG = "ble_buyer";
 
@@ -231,7 +232,10 @@ static void start_mining(void)
     s_result.mining_active = 1;
     ESP_LOGI(TAG, "BM1370: START mining + fan ON");
 
-    /* Set ASIC frequency via AxeOS HTTP API */
+    /* Set ASIC frequency + fan via NVS (immediate, no HTTP needed) */
+    nvs_config_set_u16(NVS_CONFIG_ASIC_FREQUENCY, 490);
+    nvs_config_set_bool(NVS_CONFIG_AUTO_FAN_SPEED, true);
+    /* Also try HTTP for immediate effect (may fail during BLE, that's OK) */
     char body[64];
     snprintf(body, sizeof(body), "{\"frequency\":490,\"autofanspeed\":1,\"fanspeed\":100}");
     int status = 0;
@@ -239,7 +243,7 @@ static void start_mining(void)
     boat_pal_http_post("http://localhost/api/system", NULL,
                         "application/json", body,
                         &status, resp, sizeof(resp));
-    ESP_LOGI(TAG, "AxeOS set freq=490 fan=100: HTTP %d", status);
+    ESP_LOGI(TAG, "AxeOS start: HTTP %d", status);
 }
 
 static void stop_mining(void)
@@ -248,7 +252,11 @@ static void stop_mining(void)
     s_result.mining_active = 0;
     ESP_LOGI(TAG, "BM1370: STOP mining + fan OFF");
 
-    /* Set frequency to minimum and fan off */
+    /* Set frequency=0 + fan off via NVS */
+    nvs_config_set_u16(NVS_CONFIG_ASIC_FREQUENCY, 0);
+    nvs_config_set_bool(NVS_CONFIG_AUTO_FAN_SPEED, false);
+    nvs_config_set_u16(NVS_CONFIG_MANUAL_FAN_SPEED, 0);
+    /* Also try HTTP */
     char body[64];
     snprintf(body, sizeof(body), "{\"frequency\":0,\"autofanspeed\":0,\"fanspeed\":0}");
     int status = 0;
@@ -256,7 +264,7 @@ static void stop_mining(void)
     boat_pal_http_post("http://localhost/api/system", NULL,
                         "application/json", body,
                         &status, resp, sizeof(resp));
-    ESP_LOGI(TAG, "AxeOS set freq=0 fan=0: HTTP %d", status);
+    ESP_LOGI(TAG, "AxeOS stop: HTTP %d", status);
 }
 
 /* Resume hashanchor when BLE session ends (any reason) */

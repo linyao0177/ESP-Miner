@@ -433,6 +433,11 @@ void screen_ble_buy_update(const char *line1, const char *line2, const char *lin
         if (line1) lv_label_set_text(ble_buy_line1, line1);
         if (line2) lv_label_set_text(ble_buy_line2, line2);
         if (line3) lv_label_set_text(ble_buy_line3, line3);
+        else lv_label_set_text(ble_buy_line3, "");
+        /* Auto-switch to BLE buy screen when active */
+        if (screens[SCR_BLE_BUY] && lv_scr_act() != screens[SCR_BLE_BUY]) {
+            lv_scr_load(screens[SCR_BLE_BUY]);
+        }
         lvgl_port_unlock();
     }
 }
