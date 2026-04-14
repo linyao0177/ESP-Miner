@@ -20,6 +20,7 @@
 #include "hashanchor.h"
 #include "display.h"
 #include "nvs_config.h"
+#include "esp_http_client.h"
 
 static const char *TAG = "ble_buyer";
 
@@ -112,13 +113,15 @@ static void oled_update(void)
         snprintf(l2, 48, "$%.2f/kWh", price_kwh);
         l3[0] = '\0';
         break;
-    case BLE_BUYER_STREAMING:
+    case BLE_BUYER_STREAMING: {
+        double slice_usd = (double)s_result.price_per_slice / 1000000.0;
         snprintf(l1, 48, "MINING $%.2f/kWh", price_kwh);
         snprintf(l2, 48, "Slice %lu/%lu",
                  (unsigned long)s_result.slices_paid,
                  (unsigned long)s_result.max_slices);
-        snprintf(l3, 48, "$%.6f paid", paid_usd);
+        snprintf(l3, 48, "$%.6f/slice", slice_usd);
         break;
+    }
     case BLE_BUYER_DECIDING:
         snprintf(l1, 48, "Session #%lu done", (unsigned long)s_result.total_sessions);
         snprintf(l2, 48, "$%.6f total", paid_usd);
@@ -230,7 +233,24 @@ static int on_verify_debug_read(uint16_t conn, const struct ble_gatt_error *erro
                                  struct ble_gatt_attr *attr, void *arg);
 static void send_stream_request(void);
 
-/* ---- BM1370 control via localhost HTTP ---- */
+/* ---- BM1370 control via localhost HTTP PATCH ---- */
+
+static void axeos_patch(const char *body)
+{
+    esp_http_client_config_t cfg = {
+        .url = "http://localhost/api/system",
+        .method = HTTP_METHOD_PATCH,
+        .timeout_ms = 5000,
+    };
+    esp_http_client_handle_t c = esp_http_client_init(&cfg);
+    if (!c) return;
+    esp_http_client_set_header(c, "Content-Type", "application/json");
+    esp_http_client_set_post_field(c, body, strlen(body));
+    esp_err_t err = esp_http_client_perform(c);
+    int status = esp_http_client_get_status_code(c);
+    ESP_LOGI(TAG, "AxeOS PATCH: %d (err=%d)", status, err);
+    esp_http_client_cleanup(c);
+}
 
 static void start_mining(void)
 {
@@ -238,18 +258,9 @@ static void start_mining(void)
     s_result.mining_active = 1;
     ESP_LOGI(TAG, "BM1370: START mining + fan ON");
 
-    /* Set ASIC frequency + fan via NVS (immediate, no HTTP needed) */
     nvs_config_set_u16(NVS_CONFIG_ASIC_FREQUENCY, 490);
     nvs_config_set_bool(NVS_CONFIG_AUTO_FAN_SPEED, true);
-    /* Also try HTTP for immediate effect (may fail during BLE, that's OK) */
-    char body[64];
-    snprintf(body, sizeof(body), "{\"frequency\":490,\"autofanspeed\":1,\"fanspeed\":100}");
-    int status = 0;
-    char resp[128] = {0};
-    boat_pal_http_post("http://localhost/api/system", NULL,
-                        "application/json", body,
-                        &status, resp, sizeof(resp));
-    ESP_LOGI(TAG, "AxeOS start: HTTP %d", status);
+    axeos_patch("{\"frequency\":490,\"autofanspeed\":1,\"fanspeed\":100}");
 }
 
 static void stop_mining(void)
@@ -258,19 +269,10 @@ static void stop_mining(void)
     s_result.mining_active = 0;
     ESP_LOGI(TAG, "BM1370: STOP mining + fan OFF");
 
-    /* Set frequency=0 + fan off via NVS */
     nvs_config_set_u16(NVS_CONFIG_ASIC_FREQUENCY, 0);
     nvs_config_set_bool(NVS_CONFIG_AUTO_FAN_SPEED, false);
     nvs_config_set_u16(NVS_CONFIG_MANUAL_FAN_SPEED, 0);
-    /* Also try HTTP */
-    char body[64];
-    snprintf(body, sizeof(body), "{\"frequency\":0,\"autofanspeed\":0,\"fanspeed\":0}");
-    int status = 0;
-    char resp[128] = {0};
-    boat_pal_http_post("http://localhost/api/system", NULL,
-                        "application/json", body,
-                        &status, resp, sizeof(resp));
-    ESP_LOGI(TAG, "AxeOS stop: HTTP %d", status);
+    axeos_patch("{\"frequency\":0,\"autofanspeed\":0,\"fanspeed\":0}");
 }
 
 /* Resume hashanchor when BLE session ends (any reason) */
@@ -306,16 +308,14 @@ static void sign_and_send_slice(const char *slice_json)
         buf[0] = 0;
         jget(slice_json, "valid_after", buf, sizeof(buf));
         slice.valid_after = (uint32_t)atoi(buf);
-
-        buf[0] = 0;
-        jget(slice_json, "valid_before", buf, sizeof(buf));
-        slice.valid_before = (uint32_t)atoi(buf);
     } else {
         /* First slice: no slice_request yet */
         boat_pal_random(slice.nonce, 32);
         slice.valid_after = 0;
-        slice.valid_before = boat_pal_time() + 345600; /* 4 days — Circle Gateway minimum */
     }
+    /* Always use 4-day window for settle compatibility
+     * (eCandle SliceRequest sends validBefore=now+10s which expires before settle) */
+    slice.valid_before = boat_pal_time() + 345600;
 
     /* Set EIP-712 domain: GatewayWalletBatched (Arc USDC doesn't support EIP-3009 directly) */
     boat_pay_set_domain_ext(CHAIN_ID, GATEWAY_ARC, DOMAIN_NAME, DOMAIN_VERSION);
@@ -864,21 +864,20 @@ static int gap_event(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_DISC_COMPLETE:
         if (!s_target_found) {
             if (s_result.auto_mode) {
-                /* Auto mode: rescan after delay */
+                /* Auto mode: rescan immediately (no vTaskDelay in NimBLE callback!) */
                 if (s_result.state == BLE_BUYER_WAITING) {
-                    ESP_LOGI(TAG, "Price too high, rescan in %dms", RESCAN_DELAY_MS);
+                    ESP_LOGI(TAG, "Price too high, rescanning...");
                 } else {
-                    ESP_LOGI(TAG, "No ECandle found, rescan in %dms", RESCAN_DELAY_MS);
+                    ESP_LOGI(TAG, "No ECandle found, rescanning...");
                     s_result.state = BLE_BUYER_SCANNING;
                 }
-    oled_update();
-                vTaskDelay(pdMS_TO_TICKS(RESCAN_DELAY_MS));
+                oled_update();
                 s_target_found = 0;
-                struct ble_gap_disc_params params = { .filter_duplicates = 1, .passive = 1 };
+                struct ble_gap_disc_params params = { .filter_duplicates = 0, .passive = 1 };
                 ble_gap_adv_stop();
                 uint8_t addr_type;
                 ble_hs_id_infer_auto(0, &addr_type);
-                ble_gap_disc(addr_type, SCAN_DURATION_MS, &params, gap_event, NULL);
+                ble_gap_disc(addr_type, 15000, &params, gap_event, NULL);
             } else {
                 ESP_LOGW(TAG, "Scan done, no ECandle found");
                 snprintf(s_result.error, sizeof(s_result.error), "no ECandle found");
@@ -916,18 +915,17 @@ static int gap_event(struct ble_gap_event *event, void *arg)
         stop_mining();
 
         if (s_result.state == BLE_BUYER_DECIDING) {
-            /* Session complete, rescan to check price for next buy */
-            ESP_LOGI(TAG, "Session done (total=%d), rescanning for price...",
+            /* Session complete, rescan (no vTaskDelay in NimBLE callback!) */
+            ESP_LOGI(TAG, "Session done (total=%d), rescanning...",
                      (int)s_result.total_sessions);
             s_target_found = 0;
             s_result.state = BLE_BUYER_SCANNING;
-            vTaskDelay(pdMS_TO_TICKS(2000)); /* brief delay before rescan */
-    oled_update();
+            oled_update();
             struct ble_gap_disc_params params = { .filter_duplicates = 0, .passive = 1 };
             ble_gap_adv_stop();
             uint8_t addr_type;
             ble_hs_id_infer_auto(0, &addr_type);
-            ble_gap_disc(addr_type, SCAN_DURATION_MS, &params, gap_event, NULL);
+            ble_gap_disc(addr_type, 15000, &params, gap_event, NULL);
         } else if (s_result.state == BLE_BUYER_STREAMING ||
                    s_result.state == BLE_BUYER_NEGOTIATING) {
             /* Unexpected disconnect during session — auto reconnect */
