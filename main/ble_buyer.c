@@ -296,6 +296,8 @@ static void sign_and_send_slice(const char *slice_json)
     boat_nano_slice_t slice = {0};
     char nonce_str[67] = {0};
 
+    uint64_t slice_price = s_result.price_per_slice; /* default: session price */
+
     if (slice_json) {
         char buf[20] = {0};
         jget(slice_json, "slice_id", buf, sizeof(buf));
@@ -308,6 +310,17 @@ static void sign_and_send_slice(const char *slice_json)
         buf[0] = 0;
         jget(slice_json, "valid_after", buf, sizeof(buf));
         slice.valid_after = (uint32_t)atoi(buf);
+
+        /* Use realtime price from SliceRequest if available */
+        buf[0] = 0;
+        jget(slice_json, "price", buf, sizeof(buf));
+        if (buf[0]) {
+            uint64_t rt = (uint64_t)atoi(buf);
+            if (rt > 0) {
+                slice_price = rt;
+                s_result.price_per_slice = rt; /* update for OLED display */
+            }
+        }
     } else {
         /* First slice: no slice_request yet */
         boat_pal_random(slice.nonce, 32);
@@ -324,9 +337,9 @@ static void sign_and_send_slice(const char *slice_json)
     boat_payment_t pay;
     memset(&pay, 0, sizeof(pay));
     memcpy(pay.to, s_seller_addr, 20);
-    /* value: uint256 big-endian */
+    /* value: uint256 big-endian — use realtime price */
     {
-        uint64_t v = s_result.price_per_slice;
+        uint64_t v = slice_price;
         for (int i = 7; i >= 0; i--) pay.value[31-i] = (uint8_t)(v >> (i*8));
     }
     pay.valid_after  = slice.valid_after;
