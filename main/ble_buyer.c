@@ -91,7 +91,9 @@ static void oled_update(void)
 
     /* Convert price: price_per_kWh = price_per_slice / 1000
      * (per eCandle PRD: 42 μUSD/slice = $0.042/kWh) */
-    double price_kwh = (double)s_result.price_per_slice / 1000.0;
+    double price_kwh = (s_result.price_per_kwh > 0)
+        ? (double)s_result.price_per_kwh
+        : (double)s_result.price_per_slice * 1000.0 / 1000000.0 / 0.042;
     double paid_usd = (double)s_result.total_paid / 1000000.0;
 
     switch (s_result.state) {
@@ -722,9 +724,16 @@ static void handle_notify(uint16_t attr_handle, const uint8_t *data, uint16_t le
 
         s_result.price_per_slice = jget_u64(json, "price_per_slice");
         if (s_result.price_per_slice == 0) {
-            /* Fallback: try "amount" field */
+            s_result.price_per_slice = jget_u64(json, "price_uslice");
+        }
+        if (s_result.price_per_slice == 0) {
             s_result.price_per_slice = jget_u64(json, "amount");
         }
+
+        /* Parse $/kWh for OLED (eCandle sends as string e.g. "0.93") */
+        char kwh_str[16] = {0};
+        jget(json, "price_per_kwh", kwh_str, sizeof(kwh_str));
+        if (kwh_str[0]) s_result.price_per_kwh = strtof(kwh_str, NULL);
 
         char pay_to[43] = {0};
         jget(json, "payTo", pay_to, sizeof(pay_to));

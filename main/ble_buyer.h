@@ -28,6 +28,7 @@ typedef struct {
     char seller_addr[43];        /* seller ETH address (payTo) */
     char seller_name[32];        /* BLE device name */
     uint64_t price_per_slice;    /* USDC base units from advertising/offer */
+    float price_per_kwh;         /* $/kWh from StreamOffer (for OLED display) */
     uint64_t threshold;          /* profitability threshold (USDC base units/slice) */
     uint32_t slice_seconds;
     uint32_t max_slices;
