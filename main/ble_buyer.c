@@ -437,9 +437,16 @@ static int on_verify_debug_read(uint16_t conn, const struct ble_gatt_error *erro
         if (json) {
             ble_hs_mbuf_to_flat(attr->om, json, len, NULL);
             json[len] = '\0';
-            ESP_LOGW(TAG, "=== VERIFY DEBUG: %s ===", json);
 
-            /* Store in error field so HTTP API can show it */
+            /* Update realtime price from DeviceInfo for next slice */
+            uint64_t rt_price = jget_u64(json, "price_uslice");
+            if (rt_price > 0) {
+                s_result.price_per_slice = rt_price;
+                s_result.price_per_kwh = 0; /* force recalc from new price */
+                oled_update();
+            }
+
+            /* Store verify debug info */
             char last_verify[128] = {0};
             jget(json, "last_verify", last_verify, sizeof(last_verify));
             if (last_verify[0]) {
