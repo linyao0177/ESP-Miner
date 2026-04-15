@@ -64,6 +64,7 @@ static uint32_t s_slice_seconds = 10;
 static uint16_t s_adv_price = 0;    /* price from advertising data */
 static uint8_t  s_adv_avail = 0;    /* available Wh from advertising */
 static uint8_t  s_adv_state = 0xFF; /* seller state from advertising */
+static TimerHandle_t s_auto_timer = NULL; /* auto mode watchdog timer */
 
 /* Discovered characteristic value handles */
 static uint16_t h_stream_request = 0;
@@ -83,6 +84,43 @@ static uint16_t s_svc_end_handle = 0;
 
 /* Seller address in binary */
 static uint8_t s_seller_addr[20] = {0};
+
+/* Forward decls */
+static int gap_event(struct ble_gap_event *event, void *arg);
+static void oled_update(void);
+
+/*
+ * Auto mode watchdog: fires every 10 seconds.
+ * If auto_mode is on but state is stuck (COMPLETE/ERROR/IDLE), restart scan.
+ * This makes the auto loop bulletproof against missed BLE events / race conditions.
+ */
+static void auto_timer_cb(TimerHandle_t t)
+{
+    if (!s_result.auto_mode) {
+        xTimerStop(s_auto_timer, 0);
+        return;
+    }
+    if (s_result.state == BLE_BUYER_COMPLETE ||
+        s_result.state == BLE_BUYER_ERROR ||
+        s_result.state == BLE_BUYER_IDLE) {
+        ESP_LOGI("ble_buyer", "Auto watchdog: state=%d, restarting scan", (int)s_result.state);
+        s_result.error[0] = '\0';
+        s_target_found = 0;
+        s_result.slices_paid = 0;
+        s_result.state = BLE_BUYER_SCANNING;
+        s_conn = BLE_HS_CONN_HANDLE_NONE;
+        oled_update();
+        ble_gap_disc_cancel();
+        ble_gap_adv_stop();
+        uint8_t at;
+        ble_hs_id_infer_auto(0, &at);
+        struct ble_gap_disc_params p = { .filter_duplicates = 0, .passive = 1 };
+        int rc = ble_gap_disc(at, 15000, &p, gap_event, NULL);
+        if (rc != 0) {
+            ESP_LOGW("ble_buyer", "Auto watchdog: ble_gap_disc failed: %d", rc);
+        }
+    }
+}
 
 /* ---- OLED display helper ---- */
 static void oled_update(void)
@@ -226,7 +264,6 @@ static int auth_to_json(const boat_nano_auth_t *a, char *out, size_t max)
 }
 
 /* ---- Forward declarations ---- */
-static int gap_event(struct ble_gap_event *event, void *arg);
 static void sign_and_send_slice(const char *slice_json);
 static void start_mining(void);
 static void stop_mining(void);
@@ -885,8 +922,22 @@ static int gap_event(struct ble_gap_event *event, void *arg)
             int rc = ble_gap_connect(BLE_OWN_ADDR_PUBLIC, &event->disc.addr,
                                       10000, NULL, gap_event, NULL);
             if (rc != 0) {
-                snprintf(s_result.error, sizeof(s_result.error), "connect: %d", rc);
-                s_result.state = BLE_BUYER_ERROR;
+                ESP_LOGW(TAG, "ble_gap_connect failed: %d", rc);
+                if (s_result.auto_mode) {
+                    /* Auto mode: retry scan instead of stopping */
+                    ESP_LOGI(TAG, "Auto mode: connect failed, rescanning...");
+                    s_target_found = 0;
+                    s_result.state = BLE_BUYER_SCANNING;
+                    oled_update();
+                    struct ble_gap_disc_params rp = { .filter_duplicates = 0, .passive = 1 };
+                    ble_gap_adv_stop();
+                    uint8_t at2;
+                    ble_hs_id_infer_auto(0, &at2);
+                    ble_gap_disc(at2, 15000, &rp, gap_event, NULL);
+                } else {
+                    snprintf(s_result.error, sizeof(s_result.error), "connect: %d", rc);
+                    s_result.state = BLE_BUYER_ERROR;
+                }
             }
         }
         break;
@@ -966,6 +1017,21 @@ static int gap_event(struct ble_gap_event *event, void *arg)
             struct ble_gap_disc_params params = { .filter_duplicates = 1, .passive = 1 };
     oled_update();
             ble_gap_disc(BLE_OWN_ADDR_PUBLIC, SCAN_DURATION_MS, &params, gap_event, NULL);
+        } else if (s_result.auto_mode) {
+            /* Auto mode: any disconnect → rescan (handles race with COMPLETE notify) */
+            ESP_LOGI(TAG, "Auto mode: disconnect in state %d, rescanning...",
+                     (int)s_result.state);
+            stop_mining();
+            s_result.total_sessions++;
+            s_result.slices_paid = 0;
+            s_target_found = 0;
+            s_result.state = BLE_BUYER_SCANNING;
+            oled_update();
+            struct ble_gap_disc_params p = { .filter_duplicates = 0, .passive = 1 };
+            ble_gap_adv_stop();
+            uint8_t at;
+            ble_hs_id_infer_auto(0, &at);
+            ble_gap_disc(at, 15000, &p, gap_event, NULL);
         } else if (s_result.state != BLE_BUYER_COMPLETE &&
                    s_result.state != BLE_BUYER_ERROR) {
             s_result.state = BLE_BUYER_COMPLETE;
@@ -1037,18 +1103,22 @@ esp_err_t ble_buyer_init(const boat_keypair_t *kp)
     return ESP_OK;
 }
 
+/* Pending auto-mode params: set before ble_buyer_start() so they survive memset
+ * and are applied before scan begins (avoids race with NimBLE host task). */
+static int      s_pending_auto = 0;
+static uint64_t s_pending_threshold = 0;
+
 esp_err_t ble_buyer_start_auto(const char *device_name,
                                 uint64_t threshold,
                                 uint32_t max_slices,
                                 uint32_t slice_seconds)
 {
     if (!s_kp) return ESP_ERR_INVALID_STATE;
+    /* Stash auto params BEFORE start — start() applies them after memset */
+    s_pending_auto = 1;
+    s_pending_threshold = threshold > 0 ? threshold : DEFAULT_THRESHOLD;
     esp_err_t err = ble_buyer_start(device_name, max_slices, slice_seconds);
-    if (err == ESP_OK) {
-        s_result.auto_mode = 1;
-        s_result.threshold = threshold > 0 ? threshold : DEFAULT_THRESHOLD;
-        ESP_LOGI(TAG, "Auto mode: threshold=%" PRIu64 " USDC/slice", s_result.threshold);
-    }
+    s_pending_auto = 0; /* consumed */
     return err;
 }
 
@@ -1060,6 +1130,13 @@ esp_err_t ble_buyer_start(const char *device_name,
     if (s_result.state >= BLE_BUYER_SCANNING &&
         s_result.state <= BLE_BUYER_STREAMING)
         return ESP_ERR_INVALID_STATE;
+
+    /* Clean up any stale BLE state from prior session */
+    ble_gap_disc_cancel();
+    if (s_conn != BLE_HS_CONN_HANDLE_NONE) {
+        ble_gap_terminate(s_conn, BLE_ERR_REM_USER_CONN_TERM);
+        s_conn = BLE_HS_CONN_HANDLE_NONE;
+    }
 
     memset(&s_result, 0, sizeof(s_result));
     s_target_found = 0;
@@ -1073,6 +1150,19 @@ esp_err_t ble_buyer_start(const char *device_name,
         strncpy(s_target_name, device_name, sizeof(s_target_name) - 1);
     else
         s_target_name[0] = '\0';
+
+    /* Apply pending auto-mode params BEFORE scan begins (race-free) */
+    if (s_pending_auto) {
+        s_result.auto_mode = 1;
+        s_result.threshold = s_pending_threshold;
+        ESP_LOGI(TAG, "Auto mode: threshold=%" PRIu64 " USDC/slice", s_result.threshold);
+        /* Start watchdog timer: recovers from stuck states every 10s */
+        if (!s_auto_timer) {
+            s_auto_timer = xTimerCreate("auto_wd", pdMS_TO_TICKS(10000),
+                                         pdTRUE, NULL, auto_timer_cb);
+        }
+        xTimerStart(s_auto_timer, 0);
+    }
 
     s_result.state = BLE_BUYER_SCANNING;
     ESP_LOGI(TAG, "Scanning for: %s (%" PRIu32 " slices × %" PRIu32 "s)",
@@ -1119,10 +1209,12 @@ const ble_buyer_result_t *ble_buyer_get_result(void)
 
 void ble_buyer_cancel(void)
 {
+    if (s_auto_timer) xTimerStop(s_auto_timer, 0);
     if (s_result.state == BLE_BUYER_SCANNING) ble_gap_disc_cancel();
     if (s_conn != BLE_HS_CONN_HANDLE_NONE)
         ble_gap_terminate(s_conn, BLE_ERR_REM_USER_CONN_TERM);
     stop_mining();
+    s_result.auto_mode = 0;
     s_result.state = BLE_BUYER_IDLE;
     session_ended();
 }

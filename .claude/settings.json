@@ -1,0 +1,8 @@
+{
+  "skills": {
+    "build-and-ota": ".claude/skills/build-and-ota.md",
+    "demo-test": ".claude/skills/demo-test.md",
+    "debug-ble": ".claude/skills/debug-ble.md",
+    "release": ".claude/skills/release.md"
+  }
+}

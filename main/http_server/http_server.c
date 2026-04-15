@@ -1403,16 +1403,17 @@ static esp_err_t POST_ble_buy_start(httpd_req_t *req)
 {
 #ifdef CONFIG_BT_NIMBLE_ROLE_CENTRAL
     /* Optional: parse target device name from body */
-    char body[64] = {0};
+    char body[256] = {0};
     int len = httpd_req_recv(req, body, sizeof(body) - 1);
     if (len > 0) body[len] = '\0';
 
     const char *target = NULL;
-    /* Simple parse: {"target":"eCandle"} */
+    /* Simple parse: {"target":"eCandle"} or {"device_name":"ECandle"} */
     char *p = strstr(body, "\"target\":\"");
+    if (!p) p = strstr(body, "\"device_name\":\"");
     char target_buf[32] = {0};
     if (p) {
-        p += 10;
+        p = strchr(p + 1, ':') + 2; /* skip to value after :" */
         char *e = strchr(p, '"');
         if (e && (e - p) < 31) {
             memcpy(target_buf, p, e - p);
@@ -1428,7 +1429,8 @@ static esp_err_t POST_ble_buy_start(httpd_req_t *req)
     if (ms) max_slices = (uint32_t)atoi(ms + 13);
     char *ss = strstr(body, "\"slice_seconds\":");
     if (ss) slice_seconds = (uint32_t)atoi(ss + 16);
-    if (strstr(body, "\"auto\":true") || strstr(body, "\"auto\": true"))
+    if (strstr(body, "\"auto\":true") || strstr(body, "\"auto\": true") ||
+        strstr(body, "\"auto_mode\":true") || strstr(body, "\"auto_mode\": true"))
         auto_mode = 1;
     char *th = strstr(body, "\"threshold\":");
     if (th) threshold = (uint64_t)atoi(th + 12);
